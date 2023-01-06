@@ -1,0 +1,17 @@
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Orm.EF.Core.deps.json
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Orm.EF.Core.runtimeconfig.json
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Orm.EF.Core.dll
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Orm.EF.Core.pdb
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Extensions.Core.dll
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\bin\Debug\net6.0\Nostreets.Extensions.Core.pdb
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.csproj.AssemblyReference.cache
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.AssemblyInfoInputs.cache
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.AssemblyInfo.cs
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.csproj.CoreCompileInputs.cache
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.csproj.CopyComplete
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.dll
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\refint\Nostreets.Orm.EF.Core.dll
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.pdb
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\Nostreets.Orm.EF.Core.genruntimeconfig.cache
+C:\Git\nostreets\Nostreets.Orm.EF.Core\Nostreets.Orm.EF.Core\obj\Debug\net6.0\ref\Nostreets.Orm.EF.Core.dll

@@ -5,20 +5,18 @@ using System.ComponentModel.DataAnnotations.Schema;
 using System.Configuration;
 using System.Data;
 using System.Data.Common;
-using System.Data.Entity;
-using System.Data.Entity.Infrastructure;
-using System.Data.Entity.Migrations;
 using System.Data.SqlClient;
 using System.Dynamic;
 using System.Linq;
 using System.Reflection;
-
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 using Nostreets.Extensions.Extend.Basic;
 using Nostreets.Extensions.Extend.Data;
 using Nostreets.Extensions.Interfaces;
 
-namespace NostreetsEntities
+namespace Nostreets.Orm.EF
 {
     public class EFDBService<T> : IDBService<T> where T : class
     {
@@ -30,17 +28,17 @@ namespace NostreetsEntities
                 throw new Exception(output);
         }
 
-        public EFDBService(string connectionKey)
+        public EFDBService(string connectionString)
         {
             _pkName = GetPKName(typeof(T), out string output);
 
             if (output != null)
                 throw new Exception(output);
 
-            _connectionKey = connectionKey;
+            _connectionString = connectionString;
         }
 
-        private string _connectionKey = "DefaultConnection";
+        private string _connectionString;
 
         private EFDBContext<T> _context = null;
 
@@ -48,9 +46,13 @@ namespace NostreetsEntities
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionKey].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            _context.Database.ExecuteSqlCommand(TransactionalBehavior.DoNotEnsureTransaction, query);
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            {
+                _context.Records.FromSqlRaw(query);
+            }
+            
         }
 
         private string GetPKName(Type type, out string output)
@@ -76,7 +78,7 @@ namespace NostreetsEntities
         public int Count()
         {
             int result = 0;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Count();
             }
@@ -86,7 +88,7 @@ namespace NostreetsEntities
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, GetTableName()))
+            using (_context = new EFDBContext<T>(_connectionString, GetTableName()))
             {
                 result = _context.Records.ToList();
             }
@@ -116,7 +118,7 @@ namespace NostreetsEntities
             else if (pk.PropertyType.Name == "GUID")
                 model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
 
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Add(model);
 
@@ -170,7 +172,7 @@ namespace NostreetsEntities
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -190,7 +192,7 @@ namespace NostreetsEntities
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Update(model);
             }
@@ -228,7 +230,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -238,7 +240,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -260,10 +262,10 @@ namespace NostreetsEntities
             if (onChange == null)
                 throw new ArgumentNullException("onChange");
 
-            DbChangeTracker changeTracker = _context.ChangeTracker;
-            IEnumerable<DbEntityEntry<T>> entries = changeTracker.Entries<T>();
+            ChangeTracker changeTracker = _context.ChangeTracker;
+            IEnumerable<EntityEntry<T>> entries = changeTracker.Entries<T>();
 
-            foreach (DbEntityEntry<T> entry in entries)
+            foreach (EntityEntry<T> entry in entries)
             {
                 T entity = entry.Entity;
                 if (predicate == null)
@@ -278,20 +280,22 @@ namespace NostreetsEntities
 
         public static void Migrate(string connectionString)
         {
-
-            EFDBContext<T>.ConnectionString = connectionString;
-
-            //+SetInitializer
-            Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
+            throw new NotImplementedException();
 
 
-            using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
-            {
-                DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
+            //EFDBContext<T>._connectionString = connectionString;
 
-                if (!context.Database.CompatibleWithModel(false))
-                    migrator.Update();
-            }
+            ////+SetInitializer
+            //Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
+
+
+            //using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            //{
+            //    DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
+
+            //    if (!context.Database.CompatibleWithModel(false))
+            //        migrator.Update();
+            //}
 
         }
 
@@ -308,7 +312,7 @@ namespace NostreetsEntities
                 {
                     SqlParameter[] sqlParameters = parameters == null ? new SqlParameter[0] : parameters.Select(a => new SqlParameter(a.Key, a.Value)).ToArray();
 
-                    result = context.Database.SqlQuery<TResult>(query, sqlParameters).ToList();
+                    result = context.Database.SqlQueryRaw<TResult>(query, sqlParameters).ToList();
                 }
                 catch (Exception ex)
                 {
@@ -321,7 +325,7 @@ namespace NostreetsEntities
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionKey, query, parameters);
+            return QueryResults<TResult>(_connectionString, query, parameters);
         }
     }
 
@@ -333,15 +337,15 @@ namespace NostreetsEntities
                 throw new Exception("Type has to have a property called Id");
         }
 
-        public EFDBService(string connectionKey)
+        public EFDBService(string connectionString)
         {
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
 
-            _connectionKey = connectionKey;
+            _connectionString = connectionString;
         }
 
-        private string _connectionKey = "DefaultConnection";
+        private string _connectionString;
         private EFDBContext<T> _context = null;
 
         private bool NeedsIdProp(Type type, out int ordinal)
@@ -384,15 +388,18 @@ namespace NostreetsEntities
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionKey].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            _context.Database.ExecuteSqlCommand(TransactionalBehavior.DoNotEnsureTransaction, query);
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            {
+                _context.Records.FromSqlRaw(query);
+            }
         }
 
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.ToList();
             }
@@ -425,7 +432,7 @@ namespace NostreetsEntities
                 model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
             }
 
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Add(model);
 
@@ -445,7 +452,7 @@ namespace NostreetsEntities
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -455,7 +462,7 @@ namespace NostreetsEntities
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Update(model);
             }
@@ -464,7 +471,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -474,7 +481,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -571,19 +578,21 @@ namespace NostreetsEntities
 
         public static void Migrate(string connectionString)
         {
-            EFDBContext<T>.ConnectionString = connectionString;
+            throw new NotImplementedException();
+           
+            //EFDBContext<T>._connectionString = connectionString;
 
-            //+SetInitializer
-            Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
+            ////+SetInitializer
+            //Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
 
 
-            using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
-            {
-                DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
+            //using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            //{
+            //    DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
 
-                if (!context.Database.CompatibleWithModel(false))
-                    migrator.Update();
-            }
+            //    if (!context.Database.CompatibleWithModel(false))
+            //        migrator.Update();
+            //}
         }
 
         public void OnEntityChanges(Action<T> onChange, Predicate<T> predicate = null)
@@ -591,10 +600,10 @@ namespace NostreetsEntities
             if (onChange == null)
                 throw new ArgumentNullException("onChange");
 
-            DbChangeTracker changeTracker = _context.ChangeTracker;
-            IEnumerable<DbEntityEntry<T>> entries = changeTracker.Entries<T>();
+            ChangeTracker changeTracker = _context.ChangeTracker;
+            IEnumerable<EntityEntry<T>> entries = changeTracker.Entries<T>();
 
-            foreach (DbEntityEntry<T> entry in entries)
+            foreach (EntityEntry<T> entry in entries)
             {
                 T entity = entry.Entity;
                 if (predicate == null)
@@ -618,7 +627,7 @@ namespace NostreetsEntities
             {
                 try
                 {
-                    result = context.Database.SqlQuery<TResult>(query).ToList();
+                    result = context.Database.SqlQueryRaw<TResult>(query).ToList();
                 }
                 catch (Exception ex)
                 {
@@ -642,7 +651,7 @@ namespace NostreetsEntities
                 {
                     SqlParameter[] sqlParameters = parameters == null ? new SqlParameter[0] : parameters.Select(a => new SqlParameter(a.Key, a.Value)).ToArray();
 
-                    result = context.Database.SqlQuery<TResult>(query, sqlParameters).ToList();
+                    result = context.Database.SqlQueryRaw<TResult>(query, sqlParameters).ToList();
                 }
                 catch (Exception ex)
                 {
@@ -655,7 +664,7 @@ namespace NostreetsEntities
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionKey, query, parameters);
+            return QueryResults<TResult>(_connectionString, query, parameters);
         }
 
     }
@@ -668,15 +677,15 @@ namespace NostreetsEntities
                 throw new Exception("Type has to have a property called Id");
         }
 
-        public EFDBService(string connectionKey)
+        public EFDBService(string connectionString)
         {
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
 
-            _connectionKey = connectionKey;
+            _connectionString = connectionString;
         }
 
-        private string _connectionKey = "DefaultConnection";
+        private string _connectionString;
         private EFDBContext<T> _context = null;
 
         private bool NeedsIdProp(Type type, out int ordinal)
@@ -719,15 +728,18 @@ namespace NostreetsEntities
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionKey].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            _context.Database.ExecuteSqlCommand(TransactionalBehavior.DoNotEnsureTransaction, query);
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            {
+                _context.Records.FromSqlRaw(query);
+            }
         }
 
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.ToList();
             }
@@ -755,7 +767,7 @@ namespace NostreetsEntities
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -775,7 +787,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -785,7 +797,7 @@ namespace NostreetsEntities
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -813,7 +825,7 @@ namespace NostreetsEntities
                 model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
             }
 
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Add(model);
 
@@ -868,7 +880,7 @@ namespace NostreetsEntities
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionKey, typeof(T).Name))
+            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
             {
                 _context.Update(model);
             }
@@ -916,19 +928,21 @@ namespace NostreetsEntities
 
         public static void Migrate(string connectionString)
         {
-            EFDBContext<T>.ConnectionString = connectionString;
+            throw new NotImplementedException();
 
-            //+SetInitializer
-            Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
+            //EFDBContext<T>._connectionString = connectionString;
+
+            ////+SetInitializer
+            //Database.SetInitializer(new MigrateDatabaseToLatestVersion<EFDBContext<T>, GenericMigrationConfiguration<T>>());
 
 
-            using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
-            {
-                DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
+            //using (EFDBContext<T> context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            //{
+            //    DbMigrator migrator = new DbMigrator(new GenericMigrationConfiguration<T>());
 
-                if (!context.Database.CompatibleWithModel(false))
-                    migrator.Update();
-            }
+            //    if (!context.Database.CompatibleWithModel(false))
+            //        migrator.Update();
+            //}
         }
 
         public void OnEntityChanges(Action<T> onChange, Predicate<T> predicate = null)
@@ -936,10 +950,10 @@ namespace NostreetsEntities
             if (onChange == null)
                 throw new ArgumentNullException("onChange");
 
-            DbChangeTracker changeTracker = _context.ChangeTracker;
-            IEnumerable<DbEntityEntry<T>> entries = changeTracker.Entries<T>();
+            ChangeTracker changeTracker = _context.ChangeTracker;
+            IEnumerable<EntityEntry<T>> entries = changeTracker.Entries<T>();
 
-            foreach (DbEntityEntry<T> entry in entries)
+            foreach (EntityEntry<T> entry in entries)
             {
                 T entity = entry.Entity;
                 if (predicate == null)
@@ -963,7 +977,7 @@ namespace NostreetsEntities
             {
                 try
                 {
-                    result = context.Database.SqlQuery<TResult>(query).ToList();
+                    result = context.Database.SqlQueryRaw<TResult>(query).ToList();
                 }
                 catch (Exception ex)
                 {
@@ -987,7 +1001,7 @@ namespace NostreetsEntities
                 {
                     SqlParameter[] sqlParameters = parameters == null ? new SqlParameter[0] : parameters.Select(a => new SqlParameter(a.Key, a.Value)).ToArray();
 
-                    result = context.Database.SqlQuery<TResult>(query, sqlParameters).ToList();
+                    result = context.Database.SqlQueryRaw<TResult>(query, sqlParameters).ToList();
                 }
                 catch (Exception ex)
                 {
@@ -1000,38 +1014,46 @@ namespace NostreetsEntities
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionKey, query, parameters);
+            return QueryResults<TResult>(_connectionString, query, parameters);
         }
         
     }
 
     public class EFDBContext<TContext> : DbContext where TContext : class
     {
-        public EFDBContext()
-           : base(ConnectionString)
+        public EFDBContext(string connectionString) : base()
         {
-            ConnectionString = Database.Connection.ConnectionString;
-
+            _connectionString = connectionString;
         }
 
-        public EFDBContext(string connectionKey)
-            : base(connectionKey ?? ConnectionString)
+        public EFDBContext(string connectionString, string tableName) : base()
         {
-            ConnectionString = Database.Connection.ConnectionString;
-        }
-
-        public EFDBContext(string connectionKey, string tableName)
-            : base(connectionKey ?? ConnectionString)
-        {
-            ConnectionString = Database.Connection.ConnectionString;
+            _connectionString = connectionString;
 
             if (!typeof(TContext).HasAttribute<TableAttribute>() && tableName != null)
-                OnModelCreating(new DbModelBuilder().HasDefaultSchema(tableName));
+                OnModelCreating(new ModelBuilder().HasDefaultSchema(tableName));
         }
 
-        public IDbSet<TContext> Records { get; set; }
+        public EFDBContext(string connectionString, DbContextOptions options) : base(options)
+        {
+            _connectionString = connectionString;
+        }
 
-        internal static string ConnectionString { get; set; } = "DefaultConnection";
+        public DbSet<TContext> Records { get; set; }
+
+        string _connectionString { get; set; }
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        {
+            optionsBuilder.UseSqlServer(_connectionString);
+            base.OnConfiguring(optionsBuilder);
+        }
+
+        protected override void OnModelCreating(ModelBuilder mb)
+        {
+            base.OnModelCreating(mb);
+        }
+
 
         public void Add(TContext model)
         {
@@ -1060,12 +1082,7 @@ namespace NostreetsEntities
             if (SaveChanges() == 0)
                 throw new Exception("DB changes not saved!");
         }
-
-        protected override void OnModelCreating(DbModelBuilder mb)
-        {
-            base.OnModelCreating(mb);
-        }
-
+        
         private void InstantateComplexNulls(ref TContext model)
         {
             foreach (PropertyInfo complex in GetComplexTypes())
@@ -1095,21 +1112,21 @@ namespace NostreetsEntities
 
     }
 
-    public class GenericMigrationConfiguration<TContext> : DbMigrationsConfiguration<EFDBContext<TContext>> where TContext : class
-    {
-        public GenericMigrationConfiguration()
-        {
-            AutomaticMigrationDataLossAllowed = true;
-            AutomaticMigrationsEnabled = true;
-            ContextType = typeof(EFDBContext<TContext>);
-            ContextKey = "NostreetsEntities.EFDBContext`1[" + typeof(TContext) + "]";
-            TargetDatabase = new DbConnectionInfo(
-                 connectionString: EFDBContext<TContext>.ConnectionString ?? throw new ArgumentNullException("EFDBContext.ConnectionString"),
-                 providerInvariantName: "System.Data.SqlClient"
-            //"The name of the provider to use for the connection. Use 'System.Data.SqlClient' for SQL Server."
-            );
+    //public class GenericMigrationConfiguration<TContext> : DbMigrationsConfiguration<EFDBContext<TContext>> where TContext : class
+    //{
+    //    public GenericMigrationConfiguration()
+    //    {
+    //        AutomaticMigrationDataLossAllowed = true;
+    //        AutomaticMigrationsEnabled = true;
+    //        ContextType = typeof(EFDBContext<TContext>);
+    //        ContextKey = "NostreetsEntities.EFDBContext`1[" + typeof(TContext) + "]";
+    //        TargetDatabase = new DbConnectionInfo(
+    //             connectionString: EFDBContext<TContext>._connectionString ?? throw new ArgumentNullException("EFDBContext.ConnectionString"),
+    //             providerInvariantName: "System.Data.SqlClient"
+    //        //"The name of the provider to use for the connection. Use 'System.Data.SqlClient' for SQL Server."
+    //        );
 
-        }
-    }
+    //    }
+    //}
 
 }

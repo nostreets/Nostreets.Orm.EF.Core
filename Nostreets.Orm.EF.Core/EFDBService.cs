@@ -1,20 +1,22 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel.DataAnnotations;
-using System.ComponentModel.DataAnnotations.Schema;
+﻿using System.ComponentModel.DataAnnotations;
 using System.Configuration;
 using System.Data;
-using System.Data.Common;
-using System.Data.SqlClient;
-using System.Dynamic;
-using System.Linq;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
-
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 using Nostreets.Extensions.Extend.Basic;
 using Nostreets.Extensions.Extend.Data;
 using Nostreets.Extensions.Interfaces;
+using Microsoft.Data.SqlClient;
+using System.Web.Http.Results;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore.Metadata;
+using System.Data.Common;
 
 namespace Nostreets.Orm.EF
 {
@@ -22,7 +24,7 @@ namespace Nostreets.Orm.EF
     {
         public EFDBService()
         {
-            _pkName = GetPKName(typeof(T), out string output);
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
 
             if (output != null)
                 throw new Exception(output);
@@ -30,29 +32,29 @@ namespace Nostreets.Orm.EF
 
         public EFDBService(string connectionString)
         {
-            _pkName = GetPKName(typeof(T), out string output);
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
 
             if (output != null)
                 throw new Exception(output);
 
-            _connectionString = connectionString;
+            ConnectionString = connectionString;
         }
 
-        private string _connectionString;
+        public string ConnectionString { get; set; }
+        public string PrimaryKeyName { get; private set; }
 
         private EFDBContext<T> _context = null;
 
-        private string _pkName = null;
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[ConnectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Records.FromSqlRaw(query);
             }
-            
+
         }
 
         private string GetPKName(Type type, out string output)
@@ -78,7 +80,7 @@ namespace Nostreets.Orm.EF
         public int Count()
         {
             int result = 0;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Count();
             }
@@ -88,7 +90,7 @@ namespace Nostreets.Orm.EF
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, GetTableName()))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.ToList();
             }
@@ -103,26 +105,38 @@ namespace Nostreets.Orm.EF
         public T Get(object id)
         {
             //Short Way Of ---> Func<T, bool> predicate = a => a.GetType().GetProperty(_pkName).GetValue(a) == id;
-            bool predicate(T a) => a.GetType().GetProperty(_pkName).GetValue(a) == id;
+            bool predicate(T a) => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == id;
             return FirstOrDefault(predicate);
         }
 
-        public object Insert(T model)
+        public object InsertWithId(T model, Action<object> idCallback)
         {
-            object result = null;
-
-            PropertyInfo pk = model.GetType().GetProperty(_pkName);
+            object newId = null;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
 
             if (pk.PropertyType.Name.Contains("Int"))
-                model.GetType().GetProperty(pk.Name).SetValue(model, Count() + 1);
+                newId = GetAll().Count + 1;
             else if (pk.PropertyType.Name == "GUID")
-                model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
+                newId = Guid.NewGuid().ToString();
 
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            model.GetType().GetProperty(pk.Name).SetValue(model, newId);
+
+            idCallback(newId);
+
+            return Insert(model);
+        }
+
+
+        public object Insert(T model)
+        {
+            object result = default;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
+
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Add(model);
 
-                result = model.GetType().GetProperty(_pkName).GetValue(model);
+                result = model.GetType().GetProperty(PrimaryKeyName).GetValue(model);
             }
 
             return result;
@@ -166,13 +180,13 @@ namespace Nostreets.Orm.EF
 
         public void Delete(object id)
         {
-            bool predicate(T a) => a.GetType().GetProperty(_pkName).GetValue(a) == id;
+            bool predicate(T a) => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == id;
             Delete(predicate);
         }
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -192,7 +206,7 @@ namespace Nostreets.Orm.EF
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Update(model);
             }
@@ -230,7 +244,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -240,7 +254,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -306,7 +320,7 @@ namespace Nostreets.Orm.EF
 
             List<TResult> result = null;
 
-            using (var context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            using (var context = new EFDBContext<T>(connectionString))
             {
                 try
                 {
@@ -325,7 +339,7 @@ namespace Nostreets.Orm.EF
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionString, query, parameters);
+            return QueryResults<TResult>(ConnectionString, query, parameters);
         }
     }
 
@@ -333,19 +347,24 @@ namespace Nostreets.Orm.EF
     {
         public EFDBService()
         {
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
+
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
         }
 
         public EFDBService(string connectionString)
         {
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
+
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
 
-            _connectionString = connectionString;
+            ConnectionString = connectionString;
         }
 
-        private string _connectionString;
+        public string ConnectionString { get; set; }
+        public string PrimaryKeyName { get; private set; }
         private EFDBContext<T> _context = null;
 
         private bool NeedsIdProp(Type type, out int ordinal)
@@ -383,23 +402,38 @@ namespace Nostreets.Orm.EF
 
         private bool CheckIfTypeIsValid()
         {
-            return (typeof(T).GetProperties().FirstOrDefault(a => a.Name == "Id") != null) ? true : false;
+            return (typeof(T).GetProperties().FirstOrDefault(a => a.Name == PrimaryKeyName) != null) ? true : false;
         }
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[ConnectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Records.FromSqlRaw(query);
             }
         }
 
+        private string GetPKName(Type type, out string output)
+        {
+            output = null;
+            PropertyInfo pk = type.GetPropertiesByKeyAttribute()?.FirstOrDefault() ?? type.GetProperties()[0];
+
+            if (!type.IsClass)
+                output = "Generic Type has to be a custom class...";
+            else if (type.IsSystemType())
+                output = "Generic Type cannot be a system type...";
+            else if (!pk.Name.ToLower().Contains("id") && !(pk.PropertyType == typeof(int) || pk.PropertyType == typeof(Guid) || pk.PropertyType == typeof(string)))
+                output = "Primary Key must be the data type of Int32, Guid, or String and the Name needs ID in it...";
+
+            return pk.Name;
+        }
+
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.ToList();
             }
@@ -408,35 +442,41 @@ namespace Nostreets.Orm.EF
 
         public T Get(IdType id, Converter<T, T> converter)
         {
-            Func<T, bool> predicate = a => a.GetType().GetProperty("Id").GetValue(a) == (object)id;
-            return (converter == null) ? FirstOrDefault(predicate) : converter(FirstOrDefault(predicate));
+            return (converter == null) ? Get(id) : converter(Get(id));
         }
 
         public T Get(IdType id)
         {
-            return Get(id);
+            bool predicate(T a) => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
+            return FirstOrDefault(predicate);
+        }
+
+        public IdType InsertWithId(T model, Action<IdType> idCallback)
+        {
+            object newId = null;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
+
+            if (pk.PropertyType.Name.Contains("Int"))
+                newId = GetAll().Count + 1;
+            else if (pk.PropertyType.Name == "GUID")
+                newId = Guid.NewGuid().ToString();
+
+            model.GetType().GetProperty(pk.Name).SetValue(model, newId);
+
+            idCallback((IdType)newId);
+
+            return Insert(model);
         }
 
         public IdType Insert(T model)
         {
-            IdType result = default(IdType);
+            IdType result = default;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
 
-            var firstProp = model.GetType().GetProperties()[0];
-
-            if (firstProp.PropertyType.Name.Contains("Int"))
-            {
-                model.GetType().GetProperty(firstProp.Name).SetValue(model, GetAll().Count + 1);
-            }
-            else if (firstProp.PropertyType.Name == "GUID")
-            {
-                model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
-            }
-
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Add(model);
-
-                result = (IdType)model.GetType().GetProperties().GetValue(0);
+                result = (IdType)model.GetType().GetProperty(pk.Name).GetValue(model);
             }
 
             return result;
@@ -444,15 +484,13 @@ namespace Nostreets.Orm.EF
 
         public void Delete(IdType id)
         {
-            //Delete(ExpressionBuilder.GetPredicate<T>(new[] { new Filter("Id", Op.Equals, id) }));
-
-            Func<T, bool> predicate = a => a.GetType().GetProperty("Id").GetValue(a) == (object)id;
+            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
             Delete(predicate);
         }
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -462,7 +500,7 @@ namespace Nostreets.Orm.EF
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Update(model);
             }
@@ -471,7 +509,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -481,7 +519,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -579,7 +617,7 @@ namespace Nostreets.Orm.EF
         public static void Migrate(string connectionString)
         {
             throw new NotImplementedException();
-           
+
             //EFDBContext<T>._connectionString = connectionString;
 
             ////+SetInitializer
@@ -623,7 +661,7 @@ namespace Nostreets.Orm.EF
 
             List<TResult> result = null;
 
-            using (var context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            using (var context = new EFDBContext<T>(connectionString))
             {
                 try
                 {
@@ -645,7 +683,7 @@ namespace Nostreets.Orm.EF
 
             List<TResult> result = null;
 
-            using (var context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            using (var context = new EFDBContext<T>(connectionString))
             {
                 try
                 {
@@ -664,28 +702,33 @@ namespace Nostreets.Orm.EF
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionString, query, parameters);
+            return QueryResults<TResult>(ConnectionString, query, parameters);
         }
 
     }
 
-    public class EFDBService<T, IdType, AddType, UpdateType> : IDBService<T, IdType, AddType, UpdateType> where T : class 
+    public class EFDBService<T, IdType, AddType, UpdateType> : IDBService<T, IdType, AddType, UpdateType> where T : class
     {
         public EFDBService()
         {
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
+
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
         }
 
         public EFDBService(string connectionString)
         {
+            PrimaryKeyName = GetPKName(typeof(T), out string output);
+
             if (!CheckIfTypeIsValid())
                 throw new Exception("Type has to have a property called Id");
 
-            _connectionString = connectionString;
+            ConnectionString = connectionString;
         }
 
-        private string _connectionString;
+        private string ConnectionString { get; set; }
+        public string PrimaryKeyName { get; private set; }
         private EFDBContext<T> _context = null;
 
         private bool NeedsIdProp(Type type, out int ordinal)
@@ -723,23 +766,38 @@ namespace Nostreets.Orm.EF
 
         private bool CheckIfTypeIsValid()
         {
-            return (typeof(T).GetProperties().FirstOrDefault(a => a.Name == "Id") != null) ? true : false;
+            return (typeof(T).GetProperties().FirstOrDefault(a => a.Name == PrimaryKeyName) != null) ? true : false;
         }
 
         private void BackupDB(string path)
         {
-            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[_connectionString].ConnectionString);
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder(ConfigurationManager.ConnectionStrings[ConnectionString].ConnectionString);
             string query = "BACKUP DATABASE {0} TO DISK = '{1}'".FormatString(builder.InitialCatalog, path);
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Records.FromSqlRaw(query);
             }
         }
 
+        private string GetPKName(Type type, out string output)
+        {
+            output = null;
+            PropertyInfo pk = type.GetPropertiesByKeyAttribute()?.FirstOrDefault() ?? type.GetProperties()[0];
+
+            if (!type.IsClass)
+                output = "Generic Type has to be a custom class...";
+            else if (type.IsSystemType())
+                output = "Generic Type cannot be a system type...";
+            else if (!pk.Name.ToLower().Contains("id") && !(pk.PropertyType == typeof(int) || pk.PropertyType == typeof(Guid) || pk.PropertyType == typeof(string)))
+                output = "Primary Key must be the data type of Int32, Guid, or String and the Name needs ID in it...";
+
+            return pk.Name;
+        }
+
         public List<T> GetAll()
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.ToList();
             }
@@ -748,7 +806,7 @@ namespace Nostreets.Orm.EF
 
         public T Get(IdType id, Converter<T, T> converter)
         {
-            Func<T, bool> predicate = a => a.GetType().GetProperty("Id").GetValue(a) == (object)id;
+            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
             return (converter == null) ? FirstOrDefault(predicate) : converter(FirstOrDefault(predicate));
         }
 
@@ -759,15 +817,15 @@ namespace Nostreets.Orm.EF
 
         public void Delete(IdType id)
         {
-            //Delete(ExpressionBuilder.GetPredicate<T>(new[] { new Filter("Id", Op.Equals, id) }));
+            //Delete(ExpressionBuilder.GetPredicate<T>(new[] { new Filter(PrimaryKeyName, Op.Equals, id) }));
 
-            Func<T, bool> predicate = a => a.GetType().GetProperty("Id").GetValue(a) == (object)id;
+            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
             Delete(predicate);
         }
 
         public void Delete(Func<T, bool> predicate)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 T obj = _context.Records.FirstOrDefault(predicate);
 
@@ -787,7 +845,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -797,7 +855,7 @@ namespace Nostreets.Orm.EF
         public List<T> Where(Func<T, int, bool> predicate)
         {
             List<T> result = null;
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 result = _context.Records.Where(predicate).ToList();
             }
@@ -810,26 +868,32 @@ namespace Nostreets.Orm.EF
             return Where(predicate).FirstOrDefault();
         }
 
+        public IdType InsertWithId(T model, Action<IdType> idCallback)
+        {
+            object newId = null;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
+
+            if (pk.PropertyType.Name.Contains("Int"))
+                newId = GetAll().Count + 1;
+            else if (pk.PropertyType.Name == "GUID")
+                newId = Guid.NewGuid().ToString();
+
+            model.GetType().GetProperty(pk.Name).SetValue(model, newId);
+
+            idCallback((IdType)newId);
+
+            return Insert(model);
+        }
+
         public IdType Insert(T model)
         {
-            IdType result = default(IdType);
+            IdType result = default;
+            var pk = model.GetType().GetProperty(PrimaryKeyName);
 
-            var firstProp = model.GetType().GetProperties()[0];
-
-            if (firstProp.PropertyType.Name.Contains("Int"))
-            {
-                model.GetType().GetProperty(firstProp.Name).SetValue(model, GetAll().Count + 1);
-            }
-            else if (firstProp.PropertyType.Name == "GUID")
-            {
-                model.GetType().GetProperties().SetValue(Guid.NewGuid().ToString(), 0);
-            }
-
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Add(model);
-
-                result = (IdType)model.GetType().GetProperties().GetValue(0);
+                result = (IdType)model.GetType().GetProperty(pk.Name).GetValue(model);
             }
 
             return result;
@@ -880,7 +944,7 @@ namespace Nostreets.Orm.EF
 
         public void Update(T model)
         {
-            using (_context = new EFDBContext<T>(_connectionString, typeof(T).Name))
+            using (_context = new EFDBContext<T>(ConnectionString))
             {
                 _context.Update(model);
             }
@@ -973,7 +1037,7 @@ namespace Nostreets.Orm.EF
 
             List<TResult> result = null;
 
-            using (var context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            using (var context = new EFDBContext<T>(connectionString))
             {
                 try
                 {
@@ -995,7 +1059,7 @@ namespace Nostreets.Orm.EF
 
             List<TResult> result = null;
 
-            using (var context = new EFDBContext<T>(connectionString, typeof(T).Name))
+            using (var context = new EFDBContext<T>(connectionString))
             {
                 try
                 {
@@ -1014,61 +1078,70 @@ namespace Nostreets.Orm.EF
 
         public List<TResult> QueryResults<TResult>(string query, Dictionary<string, object> parameters)
         {
-            return QueryResults<TResult>(_connectionString, query, parameters);
+            return QueryResults<TResult>(ConnectionString, query, parameters);
         }
-        
+
     }
 
     public class EFDBContext<TContext> : DbContext where TContext : class
     {
-        public EFDBContext(string connectionString) : base()
+        public EFDBContext(string connectionString, string tableName = null, int timeoutInSeconds = 180) : base()
         {
             _connectionString = connectionString;
-        }
+            _tableName = tableName ?? typeof(TContext).Name;
+            _timeoutInSeconds = timeoutInSeconds;
 
-        public EFDBContext(string connectionString, string tableName) : base()
-        {
-            _connectionString = connectionString;
-
-            if (!typeof(TContext).HasAttribute<TableAttribute>() && tableName != null)
-                OnModelCreating(new ModelBuilder().HasDefaultSchema(tableName));
-        }
-
-        public EFDBContext(string connectionString, DbContextOptions options) : base(options)
-        {
-            _connectionString = connectionString;
+            EnsureCreated();
         }
 
         public DbSet<TContext> Records { get; set; }
 
         string _connectionString { get; set; }
+        string _tableName { get; set; }
+        int _timeoutInSeconds { get; set; }
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlServer(_connectionString);
+            optionsBuilder.UseSqlServer(_connectionString, options => options.CommandTimeout(_timeoutInSeconds));
+            if (!optionsBuilder.IsConfigured)
+            {
+                optionsBuilder
+                    .EnableSensitiveDataLogging()
+                    .EnableDetailedErrors()
+                    .EnableServiceProviderCaching()
+                    .EnableThreadSafetyChecks()
+                    .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll);
+
+                Migrate(optionsBuilder);
+            }
+
             base.OnConfiguring(optionsBuilder);
         }
 
         protected override void OnModelCreating(ModelBuilder mb)
         {
+            var config = mb.Entity<TContext>();
+            config.ToTable(_tableName);
             base.OnModelCreating(mb);
         }
-
 
         public void Add(TContext model)
         {
             InstantateComplexNulls(ref model);
-            Records.Add(model);
+
+            DbSet<TContext> dbSet = Set<TContext>();
+            dbSet.Add(model);
 
             if (SaveChanges() == 0)
                 throw new Exception("DB changes not saved!");
-
         }
 
         public void Update(TContext model)
         {
             InstantateComplexNulls(ref model);
-            Records.Attach(model);
+
+            DbSet<TContext> dbSet = Set<TContext>();
+            dbSet.Attach(model);
             Entry(model).State = EntityState.Modified;
 
             if (SaveChanges() == 0)
@@ -1077,12 +1150,13 @@ namespace Nostreets.Orm.EF
 
         public void Remove(TContext model)
         {
-            Records.Remove(model);
+            DbSet<TContext> dbSet = Set<TContext>();
+            dbSet.Remove(model);
 
             if (SaveChanges() == 0)
                 throw new Exception("DB changes not saved!");
         }
-        
+
         private void InstantateComplexNulls(ref TContext model)
         {
             foreach (PropertyInfo complex in GetComplexTypes())
@@ -1109,6 +1183,98 @@ namespace Nostreets.Orm.EF
                 });
 
         }
+
+        private void EnsureCreated()
+        {
+
+            if (!DoesTableExist())
+            {
+                RelationalDatabaseCreator databaseCreator = (Database.GetService<IDatabaseCreator>() as RelationalDatabaseCreator)!;
+                databaseCreator.CreateTables();
+            }
+
+            if (!DoesTableExist())
+                throw new Exception($"Unable To Create Entity Table For '{_tableName}'");
+        }
+
+        private bool Migrate(DbContextOptionsBuilder optionsBuilder)
+        {
+            // Insert a pending migration
+            var serviceProvider = ((IInfrastructure<IServiceProvider>)optionsBuilder.Options).Instance;
+            using var scope = serviceProvider.CreateScope();
+            var migrationsAssembly = scope.ServiceProvider.GetRequiredService<IMigrationsAssembly>();
+            var migrationsSqlGenerator = scope.ServiceProvider.GetRequiredService<IMigrationsSqlGenerator>();
+            var migrator = scope.ServiceProvider.GetRequiredService<IMigrator>();
+
+            var modelType = typeof(TContext);
+            var migrationId = $"{modelType.Name}-migration-{Guid.NewGuid()}";
+            var currentModel = Model;
+            var targetModel = GetTargetModel();
+
+            var differ = scope.ServiceProvider.GetRequiredService<IMigrationsModelDiffer>();
+            var operations = differ.GetDifferences(currentModel.GetRelationalModel(), targetModel.GetRelationalModel());
+
+            var migration = new MigrationBuilder(migrationId);
+            migration.Operations.AddRange(operations);
+            var sql = migrationsSqlGenerator.Generate(operations, targetModel);
+            var script = migrator.GenerateScript(migrationId, null, MigrationsSqlGenerationOptions.Default);
+
+            // Run the migration script
+            using var connection = Database.GetDbConnection();
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = script;
+            command.ExecuteNonQuery();
+
+            return true; // Indicate that the migration was successful
+        }
+
+        private IModel GetTargetModel()
+        {
+            var modelBuilder = new ModelBuilder();
+            modelBuilder.Entity<TContext>().ToTable(_tableName);
+            return (IModel)modelBuilder.Model;
+        }
+
+        private bool DoesTableExist(string tableName = null, string schemaName = null)
+        {
+            tableName = tableName ?? _tableName;
+            schemaName = schemaName ?? "dbo";
+
+            var tableExists = Database.ProviderName switch
+            {
+                "Microsoft.EntityFrameworkCore.SqlServer" => DoesTableExistsSqlServer(tableName, schemaName),
+                // Add support for other database providers if needed
+                _ => throw new NotSupportedException($"TableExists is not supported for the provider: {Database.ProviderName}")
+            };
+
+            return tableExists;
+        }
+
+        private bool DoesTableExistsSqlServer(string tableName, string schemaName)
+        {
+            var result = false;
+
+            var sql = $@"
+            SELECT 1 
+            FROM sys.tables AS T
+            INNER JOIN sys.schemas AS S ON T.schema_id = S.schema_id
+            WHERE S.name = '{schemaName}' AND T.name = '{tableName}'";
+
+            var dataSet = Database.SqlQueryRaw<int>(sql).ToList();
+
+            if (dataSet.Count > 0)
+                result = dataSet[0] > 0;
+
+            return result;
+        }
+    }
+
+    public class EFDBContext : EFDBContext<object>
+    {
+        public EFDBContext(string connectionString) : base(connectionString) { }
+
+        public EFDBContext(string connectionString, string tableName, int timeout) : base(connectionString, tableName, timeout) { }
 
     }
 

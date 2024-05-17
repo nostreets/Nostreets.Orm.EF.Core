@@ -16,6 +16,8 @@ using Nostreets.Extensions.Core.Helpers.Converter;
 using DateOnlyConverter = Nostreets.Extensions.Core.Helpers.Converter.DateOnlyConverter;
 using TimeOnlyConverter = Nostreets.Extensions.Core.Helpers.Converter.TimeOnlyConverter;
 using Nostreets.Extensions.Core.DataControl.Enums;
+using System;
+using System.Security.Cryptography;
 
 namespace Nostreets.Orm.EF
 {
@@ -83,12 +85,12 @@ namespace Nostreets.Orm.EF
             await QueryResults<int>(query);
         }
 
-        public async Task<int> Count()
+        public async Task<int> Count(Func<T, bool> predicate = null)
         {
             int result = 0;
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
             {
-                result = (await Context.GetAllAsync()).Count();
+                result = Context.Count(predicate);
             }
             return result;
         }
@@ -105,11 +107,15 @@ namespace Nostreets.Orm.EF
 
         public async Task<T> Get(object id, Converter<T, T> converter)
         {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
             return (converter == null) ? await Get(id) : converter(await Get(id));
         }
 
         public async Task<T> Get(object id)
         {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+            
             T result = null;
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
                 result = await Context.GetAsync(id);
@@ -138,46 +144,67 @@ namespace Nostreets.Orm.EF
 
         public async Task Insert(T model)
         {
+            if (model == null) throw new ArgumentNullException(nameof(model));
+
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
-                await Context.AddAsync(model);
+                await Context.InsertAsync(model);
         }
 
         public async Task Insert(T model, Converter<T, T> converter)
         {
-            model = converter(model) ?? throw new NullReferenceException("converter");
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            model = converter(model);
 
             await Insert(model);
         }
 
-        public async Task Insert(IEnumerable<T> collection)
+        public async Task InsertRange(IEnumerable<T> collection)
         {
-            if (collection == null)
-                throw new NullReferenceException("collection");
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
 
-            foreach (T item in collection)
-                await Insert(item);
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+                await Context.InsertRangeAsync(collection);
         }
 
-        public async Task Insert(IEnumerable<T> collection, Converter<T, T> converter)
+        public async Task InsertRange(IEnumerable<object> collection)
         {
-            if (collection == null)
-                throw new NullReferenceException("collection");
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
 
-            if (converter == null)
-                throw new NullReferenceException("converter");
+            var castedCollection = collection.Select(a => a as T);
 
-            foreach (T item in collection)
-                await Insert(item, converter);
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+                await Context.InsertRangeAsync(castedCollection);
+        }
+
+        public async Task InsertRange(IEnumerable<T> collection, Converter<T, T> converter)
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            var covertedCollection = collection.Select(a => converter(a));
+
+            await InsertRange(covertedCollection);
+        }
+
+        public async Task InsertRange(IEnumerable<object> collection, Converter<T, T> converter)
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            var castedCollection = collection.Select(a => a as T);
+            var covertedCollection = castedCollection.Select(a => converter(a));
+
+            await InsertRange(covertedCollection);
         }
 
         public async Task Delete(object id)
         {
-            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
-            await Delete(predicate);
-        }
+            if (id == null) throw new ArgumentNullException(nameof(id));
 
-        public async Task Delete(Func<T, bool> predicate)
-        {
+            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
+
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
             {
                 T obj = await Context.FirstOrDefaultAsync(predicate);
@@ -185,52 +212,78 @@ namespace Nostreets.Orm.EF
             }
         }
 
-        public async Task Delete(IEnumerable<object> ids)
+        public async Task DeleteRange(IEnumerable<object> ids)
         {
-            if (ids == null)
-                throw new ArgumentNullException("ids");
+            if (ids == null) throw new ArgumentNullException(nameof(ids));
 
-            foreach (object id in ids)
-                await Delete(id);
+            Func<T, bool> predicate = a => ids.Any(b => b == a.GetType().GetProperty(PrimaryKeyName).GetValue(a));
+
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+            {
+                var list = await Context.WhereAsync(predicate);
+                await Context.DeleteRangeAsync(list);
+            }
         }
 
         public async Task Update(T model)
         {
+            if (model == null) throw new ArgumentNullException(nameof(model));
+
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
                 await Context.UpdateAsync(model);
         }
 
-        public async Task Update(IEnumerable<T> collection)
+        public async Task UpdateRange(IEnumerable<T> collection)
         {
-            if (collection == null)
-                throw new NullReferenceException("collection");
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
 
-            foreach (T item in collection)
-                await Update(item);
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+                await Context.UpdateRangeAsync(collection);
         }
 
-        public async Task Update(IEnumerable<T> collection, Converter<T, T> converter)
+        public async Task UpdateRange(IEnumerable<object> collection)
         {
-            if (collection == null)
-                throw new NullReferenceException("collection");
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
 
-            if (converter == null)
-                throw new NullReferenceException("converter");
+            var castedCollection = collection.Select(a => a as T);
 
-            foreach (T item in collection)
-                await Update(converter(item));
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+                await Context.UpdateRangeAsync(castedCollection);
+        }
+
+        public async Task UpdateRange(IEnumerable<T> collection, Converter<T, T> converter)
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            var covertedCollection = collection.Select(a => converter(a));
+
+            await UpdateRange(covertedCollection);
+        }
+
+        public async Task UpdateRange(IEnumerable<object> collection, Converter<T, T> converter)
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            var castedCollection = collection.Select(a => a as T);
+            var covertedCollection = castedCollection.Select(a => converter(a));
+
+            await UpdateRange(covertedCollection);
         }
 
         public async Task Update(T model, Converter<T, T> converter)
         {
-            if (converter == null)
-                throw new NullReferenceException("converter");
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
 
             await Update(converter(model));
         }
 
         public async Task<List<T>> Where(Func<T, bool> predicate)
         {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+
             IEnumerable<T> result = null;
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
                 result = await Context.WhereAsync(predicate);
@@ -240,13 +293,14 @@ namespace Nostreets.Orm.EF
 
         public async Task<T> FirstOrDefault(Func<T, bool> predicate)
         {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+
             return (await Where(predicate)).FirstOrDefault();
         }
 
         public void OnEntityChanges(Action<T> onChange, Predicate<T> predicate = null)
         {
-            if (onChange == null)
-                throw new ArgumentNullException("onChange");
+            if (onChange == null) throw new ArgumentNullException(nameof(onChange));
 
             ChangeTracker changeTracker = Context.ChangeTracker;
             IEnumerable<EntityEntry<T>> entries = changeTracker.Entries<T>();
@@ -266,8 +320,7 @@ namespace Nostreets.Orm.EF
 
         public async Task<List<TResult>> QueryResults<TResult>(string query, Dictionary<string, object> parameters = null)
         {
-            if (query == null)
-                throw new ArgumentNullException("query");
+            if (query == null) throw new ArgumentNullException(nameof(query));
 
             List<TResult> result = null;
 
@@ -316,33 +369,47 @@ namespace Nostreets.Orm.EF
 
         public async Task Delete(IdType id)
         {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
             Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
-            await Delete(predicate);
+
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+            {
+                T obj = await Context.FirstOrDefaultAsync(predicate);
+                await Context.DeleteAsync(obj);
+            }
         }
 
-        public async Task Delete(IEnumerable<IdType> ids)
+        public async Task DeleteRange(IEnumerable<IdType> ids)
         {
-            if (ids == null)
-                throw new ArgumentNullException("ids");
+            if (ids == null) throw new ArgumentNullException(nameof(ids));
 
-            foreach (IdType id in ids)
-                await Delete(id);
+            Func<T, bool> predicate = a => ids.Any(b => (object)b == a.GetType().GetProperty(PrimaryKeyName).GetValue(a));
+
+            using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
+            {
+                var list = await Context.WhereAsync(predicate);
+                await Context.DeleteRangeAsync(list);
+            }
         }
 
         public async Task<T> Get(IdType id, Converter<T, T> converter)
         {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
             return (converter == null) ? await Get(id) : converter(await Get(id));
         }
 
         public async Task<T> Get(IdType id)
         {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
             T result = null;
             using (Context = await EFDBContext<T>.Build(ConnectionString, migrateIfNotCurrent: MigrateIfNotCurrent))
                 result = await Context.GetAsync(id);
 
             return result;
         }
-
     }
 
     public class EFDBService<T, IdType, AddType, UpdateType> : EFDBService<T, IdType>, IDBService<T, IdType, AddType, UpdateType> where T : class
@@ -355,13 +422,18 @@ namespace Nostreets.Orm.EF
 
         public async Task Insert(AddType model, Converter<AddType, T> converter)
         {
-            await Insert(converter(model));
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
+
+            var newModel = converter(model);
+
+            await Insert(newModel);
         }
 
         public async Task Update(UpdateType model, Converter<UpdateType, T> converter)
         {
-            if (converter == null)
-                throw new ArgumentNullException("converter");
+            if (model == null) throw new ArgumentNullException(nameof(model));
+            if (converter == null) throw new ArgumentNullException(nameof(converter));
 
             await Update(converter(model));
         }
@@ -416,6 +488,18 @@ namespace Nostreets.Orm.EF
             base.OnModelCreating(modelBuilder);
         }
 
+        public int Count(Func<TContext, bool> predicate = null)
+        {
+            int count = -1;
+            DbSet<TContext> dbSet = Set<TContext>();
+            if (predicate != null)
+                count = dbSet.Where(predicate).Count();
+            else
+                count = dbSet.Count();
+
+            return count;
+        }
+
         public async Task<TContext> GetAsync(object id) => await Set<TContext>().FindAsync(id);
 
         public async Task<IEnumerable<TContext>> GetAllAsync() => await Set<TContext>().ToListAsync();
@@ -430,7 +514,7 @@ namespace Nostreets.Orm.EF
             return await Task.Run(() => Set<TContext>().FirstOrDefault(predicate));
         }
 
-        public async Task AddAsync(TContext model)
+        public async Task InsertAsync(TContext model)
         {
             InstantateComplexNulls(ref model);
 
@@ -446,8 +530,7 @@ namespace Nostreets.Orm.EF
             InstantateComplexNulls(ref model);
 
             DbSet<TContext> dbSet = Set<TContext>();
-            dbSet.Attach(model);
-            Entry(model).State = EntityState.Modified;
+            dbSet.Update(model);
 
             if (await SaveChangesAsync() == 0)
                 throw new Exception("DB changes not saved!");
@@ -462,12 +545,53 @@ namespace Nostreets.Orm.EF
                 throw new Exception("DB changes not saved!");
         }
 
+        public async Task InsertRangeAsync(IEnumerable<TContext> models)
+        {
+            InstantateComplexNulls(ref models);
+
+            DbSet<TContext> dbSet = Set<TContext>();
+            await dbSet.AddRangeAsync(models);
+
+            if (await SaveChangesAsync() == 0)
+                throw new Exception("DB changes not saved!");
+        }
+
+        public async Task UpdateRangeAsync(IEnumerable<TContext> models)
+        {
+            InstantateComplexNulls(ref models);
+
+            DbSet<TContext> dbSet = Set<TContext>();
+            dbSet.UpdateRange(models);
+
+            if (await SaveChangesAsync() == 0)
+                throw new Exception("DB changes not saved!");
+        }
+
+        public async Task DeleteRangeAsync(IEnumerable<TContext> models)
+        {
+            DbSet<TContext> dbSet = Set<TContext>();
+            dbSet.RemoveRange(models);
+
+            if (await SaveChangesAsync() == 0)
+                throw new Exception("DB changes not saved!");
+        }
+
         #region Private Methods
         private void InstantateComplexNulls(ref TContext model)
         {
             foreach (PropertyInfo complex in GetComplexTypes())
                 if (model.GetPropertyValue(complex.Name) == null)
                     model.SetPropertyValue(complex.Name, complex.PropertyType.Instantiate());
+        }
+
+        private void InstantateComplexNulls(ref IEnumerable<TContext> models)
+        {
+            var count = models.Count();
+            for (var i = 0; i < count; i++)
+            {
+                var model = models.ElementAt(i);
+                InstantateComplexNulls(ref model);
+            }
         }
 
         private IEnumerable<PropertyInfo> GetComplexTypes()

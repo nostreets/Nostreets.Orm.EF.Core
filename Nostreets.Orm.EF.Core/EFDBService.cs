@@ -96,6 +96,21 @@ namespace Nostreets.Orm.EF
             await EFDBContext<T>.Build(ContextOptions);
         }
 
+        public async Task Build(EFDBContextOptions contextOptions)
+        {
+            await EFDBContext<T>.Build(contextOptions);
+        }
+
+        public async Task Build(object contextOptions)
+        {
+            var isOptionsCorrect = contextOptions is EFDBContextOptions;
+
+            if (!isOptionsCorrect)
+                throw new ArgumentException("Context options object is not of type EFDBContextOptions");
+
+            await EFDBContext<T>.Build((EFDBContextOptions)contextOptions);
+        }
+
         public async Task Backup(string path)
         {
             var connectionString = ConfigurationManager.ConnectionStrings[ContextOptions.ConnectionString].ConnectionString;
@@ -488,7 +503,7 @@ namespace Nostreets.Orm.EF
         public async static Task<EFDBContext<TContext>> Build(EFDBContextOptions options)
         {
             var context = new EFDBContext<TContext>(options);
-            await context.CheckIfCreated();
+            await context.CheckIfCreated(options);
 
             if (options.MigrateIfNotCurrent)
             {
@@ -503,7 +518,9 @@ namespace Nostreets.Orm.EF
         private EFDBContext(EFDBContextOptions options) : base()
         {
             ConnectionString = options.ConnectionString;
-            TableName = options.TableName ?? typeof(TContext).Name;
+            TableName = options.TableName
+                ?? typeof(TContext).GetCustomAttribute<TableAttribute>()?.Name
+                ?? typeof(TContext).Name;
             TimeoutInSeconds = options.TimeoutInSeconds;
         }
 
@@ -693,7 +710,7 @@ namespace Nostreets.Orm.EF
                 });
         }
 
-        private async Task CheckIfCreated()
+        private async Task CheckIfCreated(EFDBContextOptions options)
         {
             if (CheckComplete)
                 return;
@@ -702,14 +719,21 @@ namespace Nostreets.Orm.EF
             {
                 RelationalDatabaseCreator databaseCreator = (Database.GetService<IDatabaseCreator>() as RelationalDatabaseCreator)!;
                 await databaseCreator.CreateTablesAsync();
-                await GenerateEnumTables();
-                await GenerateForeignKeys();
             }
 
-            if (!DoesTableExist())
-                throw new Exception($"Unable To Create Entity Table For '{TableName}'");
+            if (options.CreateEnumTables)
+                await GenerateEnumTables();
 
-            CheckComplete = true;
+            if (options.CreateFKs)
+                await GenerateForeignKeys();
+
+            if (!DoesTableExist())
+                throw new Exception($"Unable To Create Context Table For '{TableName}'");
+
+            if (options.CheckCompleteDelegate != null)
+                CheckComplete = options.CheckCompleteDelegate();
+            else
+                CheckComplete = true;
         }
 
         private async Task GenerateEnumTables()
@@ -757,16 +781,32 @@ namespace Nostreets.Orm.EF
 
                 var parentTable = fkVals[0];
                 var parentTableId = fkVals[1];
+                var constraintName = $"FK_{TableName}_{fkProp.Name}";
+
+                if (DoesForeignKeyExist(constraintName))
+                    continue;
 
                 string sql = $@"
                     ALTER TABLE {TableName}
-                    ADD CONSTRAINT FK_{TableName}_{fkProp.Name}
+                    ADD CONSTRAINT {constraintName}
                     FOREIGN KEY ({fkProp.Name})
                     REFERENCES {parentTable}({parentTableId});
                 ";
 
                 await Database.ExecuteSqlRawAsync(sql);
             }
+        }
+
+        private bool DoesForeignKeyExist(string constraintName)
+        {
+            var sql = $@"
+                SELECT 1
+                FROM sys.foreign_keys
+                WHERE name = '{constraintName}'";
+
+            var result = Database.SqlQueryRaw<int>(sql).ToList();
+
+            return result.Count > 0 && result[0] > 0;
         }
 
         private void Migrate()
@@ -901,5 +941,9 @@ namespace Nostreets.Orm.EF
         public string TableName { get; set; } = null;
         public int TimeoutInSeconds { get; set; } = 180;
         public bool MigrateIfNotCurrent { get; set; } = false;
+        public bool CreateContextTable { get; set; } = true;
+        public bool CreateEnumTables { get; set; } = true;
+        public bool CreateFKs { get; set; } = true;
+        public Func<bool> CheckCompleteDelegate { get; set; } = null;
     }
 }

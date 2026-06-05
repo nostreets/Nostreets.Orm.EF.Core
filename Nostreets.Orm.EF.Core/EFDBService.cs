@@ -779,9 +779,12 @@ namespace Nostreets.Orm.EF
                 if (fkVals.Length < 2)
                     continue;
 
+                var columnAttr = fkProp.GetCustomAttributes(typeof(ColumnAttribute)).FirstOrDefault() as ColumnAttribute;
+                var columnName = columnAttr != null && !string.IsNullOrEmpty(columnAttr.Name) ? columnAttr.Name : fkProp.Name;
+
                 var parentTable = fkVals[0];
                 var parentTableId = fkVals[1];
-                var constraintName = $"FK_{TableName}_{fkProp.Name}";
+                var constraintName = $"FK_{TableName}_{columnName}";
 
                 if (DoesForeignKeyExist(constraintName))
                     continue;
@@ -789,7 +792,7 @@ namespace Nostreets.Orm.EF
                 string sql = $@"
                     ALTER TABLE {TableName}
                     ADD CONSTRAINT {constraintName}
-                    FOREIGN KEY ({fkProp.Name})
+                    FOREIGN KEY ({columnName})
                     REFERENCES {parentTable}({parentTableId});
                 ";
 

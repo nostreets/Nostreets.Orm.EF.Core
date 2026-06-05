@@ -1,0 +1,19 @@
+<Project>
+
+  <!--
+    In-house NuGet packaging metadata for this repo (SDK/NuGet switch effort).
+    Applies to every project beneath this folder. Pack explicitly with:
+      dotnet pack <csproj> -c Release -o <local-feed>
+    Versioning: manual SemVer, bumped per release of this repo.
+  -->
+  <PropertyGroup>
+    <Version>1.0.0</Version>
+    <Authors>Overstreet Systems</Authors>
+    <Company>Overstreet Systems</Company>
+    <Product>Nostreets</Product>
+    <Description>Nostreets EF Core ORM wrapper (IDBService) over Entity Framework Core.</Description>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+
+</Project>

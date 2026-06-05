@@ -1,9 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Configurations>Debug;Release;ProjectRef;NugetRef</Configurations>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,8 +13,12 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="7.0.2" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- In-house dependency, switchable: live ProjectReference in Debug/Release/ProjectRef; published NuGet package (local feed) in NugetRef. -->
+  <ItemGroup Condition="'$(Configuration)' != 'NugetRef'">
     <ProjectReference Include="..\..\Nostreets.Extensions.Core\Nostreets.Extensions.Core\Nostreets.Extensions.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)' == 'NugetRef'">
+    <PackageReference Include="Nostreets.Extensions.Core" Version="1.0.0" />
   </ItemGroup>
 
 </Project>

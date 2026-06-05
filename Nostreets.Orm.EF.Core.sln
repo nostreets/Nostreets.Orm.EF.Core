@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.4.33205.214
@@ -11,16 +11,25 @@ Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
+		ProjectRef|Any CPU = ProjectRef|Any CPU
+		NugetRef|Any CPU = NugetRef|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.ProjectRef|Any CPU.ActiveCfg = ProjectRef|Any CPU
+		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.ProjectRef|Any CPU.Build.0 = ProjectRef|Any CPU
+		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.NugetRef|Any CPU.ActiveCfg = NugetRef|Any CPU
+		{BFA28240-AA7A-4CB1-A652-61FFB15D630E}.NugetRef|Any CPU.Build.0 = NugetRef|Any CPU
 		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.Release|Any CPU.Build.0 = Release|Any CPU
+		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.ProjectRef|Any CPU.ActiveCfg = Debug|Any CPU
+		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.ProjectRef|Any CPU.Build.0 = Debug|Any CPU
+		{82F7B3D3-34A0-426A-8080-925C80A4AA91}.NugetRef|Any CPU.ActiveCfg = Debug|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

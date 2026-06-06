@@ -78,7 +78,7 @@ filter in memory. Designed for modest result sets; for large tables push filteri
 - net8.0; repo-level `Directory.Build.props` (metadata + `<Version>` manual SemVer `1.0.0`);
   `GeneratePackageOnBuild=false` → `dotnet pack <csproj> -c Release -o "C:\Users\Nile O\.nuget-local-feed"`.
 - Same-version dev loop: deleting the cached package under `%USERPROFILE%\.nuget\packages\nostreets.orm.ef.core`
-  forces consumers to re-extract a freshly-packed `1.0.0` (the `build-sdk` pipeline automates this for SDKs).
+  forces consumers to re-extract a freshly-packed `1.0.0` (each service's `create-nuget-packages.ps1` automates this for SDKs).
 
 ## What to Avoid
 

@@ -1,4 +1,4 @@
-<Project>
+﻿<Project>
 
   <!--
     In-house NuGet packaging metadata for this repo (SDK/NuGet switch effort).
@@ -7,7 +7,7 @@
     Versioning: manual SemVer, bumped per release of this repo.
   -->
   <PropertyGroup>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <Authors>Overstreet Systems</Authors>
     <Company>Overstreet Systems</Company>
     <Product>Nostreets</Product>

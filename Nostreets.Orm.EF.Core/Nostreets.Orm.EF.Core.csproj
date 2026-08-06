@@ -14,6 +14,12 @@
   </ItemGroup>
 
   <!-- In-house dependency, switchable: live ProjectReference in Debug/Release/ProjectRef; published NuGet package (local feed) in NugetRef. -->
+  <ItemGroup>
+    <!-- A4-1's fix lives in `MatchesPrimaryKey` / `MatchesAnyPrimaryKey`, which are internal
+         precisely so the predicate is testable without standing up a database. -->
+    <InternalsVisibleTo Include="Nostreets.Orm.EF.Core.Test" />
+  </ItemGroup>
+
   <ItemGroup Condition="'$(Configuration)' != 'NugetRef'">
     <ProjectReference Include="..\..\Nostreets.Extensions.Core\Nostreets.Extensions.Core\Nostreets.Extensions.Core.csproj" />
   </ItemGroup>

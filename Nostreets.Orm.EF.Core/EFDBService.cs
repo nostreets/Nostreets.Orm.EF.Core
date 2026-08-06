@@ -91,6 +91,79 @@ namespace Nostreets.Orm.EF
             return typeof(T).Name;
         }
 
+        /// <summary>
+        /// A4-1 / BUG-68(1) — builds the by-primary-key predicate the four <c>Delete</c> overloads use.
+        ///
+        /// It is a member of its own for two reasons. First, the bug it replaces was invisible at the
+        /// call site. All four overloads read
+        /// <code>a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id</code>
+        /// where **both operands are statically `object`**, so `==` bound to **reference** equality
+        /// instead of `string`/`int`/`Guid` value equality. `GetValue` boxes a value-type key into a
+        /// fresh box on every call, and EF materialises a fresh `string` instance per row, so the
+        /// reference was never the caller's — **the predicate matched no row, ever, for every entity
+        /// type in the estate.** `FirstOrDefaultAsync` then returned null and `dbSet.Remove(null)`
+        /// threw `ArgumentNullException`, which is why an id-keyed HARD delete has never worked.
+        /// (The default soft path was unaffected: it archives via `Update`, never through here.)
+        /// Second, this is the only part of `Delete` that is testable without a database.
+        ///
+        /// <c>Equals(object, object)</c> is the fix — it dispatches to the runtime type's `Equals`,
+        /// so every supported key type compares by value.
+        ///
+        /// Resolving the <see cref="PropertyInfo"/> ONCE, from <c>typeof(T)</c> rather than
+        /// <c>a.GetType()</c> per row, is deliberate: it drops a reflection lookup per materialised
+        /// row, and `a.GetType()` reports the proxy type for a lazy-loading proxy while the key is
+        /// declared on T.
+        /// </summary>
+        internal Func<T, bool> MatchesPrimaryKey(object id)
+        {
+            PropertyInfo pk = PrimaryKeyProperty();
+            return a => a != null && Equals(pk.GetValue(a), id);
+        }
+
+        /// <summary>
+        /// Range form of <see cref="MatchesPrimaryKey"/>. Nulls are DROPPED rather than matched — a
+        /// null id would otherwise match every row whose key is null, i.e. a delete nobody asked for.
+        /// The set is materialised once because the predicate runs per materialised row and the
+        /// caller's sequence may be lazy; <see cref="HashSet{T}"/> keyed on `object` uses
+        /// `Equals`/`GetHashCode`, which `string`/`int`/`Guid` all implement by value.
+        /// </summary>
+        internal Func<T, bool> MatchesAnyPrimaryKey(IEnumerable<object> ids)
+        {
+            PropertyInfo pk = PrimaryKeyProperty();
+            var wanted = new HashSet<object>(ids?.Where(a => a != null) ?? Enumerable.Empty<object>());
+            return a => a != null && wanted.Contains(pk.GetValue(a));
+        }
+
+        private PropertyInfo PrimaryKeyProperty()
+        {
+            return typeof(T).GetProperty(PrimaryKeyName)
+                ?? throw new InvalidOperationException(
+                    $"{typeof(T).Name} has no property named '{PrimaryKeyName}' to match a primary key against.");
+        }
+
+        /// <summary>
+        /// A miss used to surface as a bare <c>ArgumentNullException</c> from <c>dbSet.Remove(null)</c>
+        /// naming neither the id nor the table — which is why A4-1 read as a mystery rather than as
+        /// "the predicate is broken". Now that the predicate works, reaching this means the row is
+        /// genuinely absent, so say which row and which table.
+        /// </summary>
+        internal static string NoRowMessage(object id) =>
+            $"Cannot delete from {GetTableName()}: no row where {typeof(T).Name} primary key = '{id}'.";
+
+        /// <summary>
+        /// Range form. The old code path was worse than the single-id one: an empty match list reached
+        /// <c>RemoveRange([])</c>, <c>SaveChangesAsync()</c> returned 0, and the caller got the
+        /// context-wide <c>"DB changes not saved!"</c> — a message that says nothing about ids at all.
+        /// A PARTIAL match is deliberately still allowed through: deleting the rows that do exist is
+        /// the caller's intent, and failing the whole call over one already-gone id would make
+        /// range-delete unusable for cleanup.
+        /// </summary>
+        internal static string NoRowsMessage(IEnumerable<object> ids)
+        {
+            var supplied = ids?.Where(a => a != null).ToList() ?? new List<object>();
+            return $"Cannot delete from {GetTableName()}: none of the {supplied.Count} supplied primary key(s) matched a row.";
+        }
+
         public async Task Build()
         {
             await EFDBContext<T>.Build(ContextOptions);
@@ -237,11 +310,12 @@ namespace Nostreets.Orm.EF
         {
             if (id == null) throw new ArgumentNullException(nameof(id));
 
-            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
-
             using (var context = await EFDBContext<T>.Build(ContextOptions))
             {
-                T obj = await context.FirstOrDefaultAsync(predicate);
+                T obj = await context.FirstOrDefaultAsync(MatchesPrimaryKey(id));
+                if (obj == null)
+                    throw new InvalidOperationException(NoRowMessage(id));
+
                 await context.DeleteAsync(obj);
             }
         }
@@ -250,11 +324,12 @@ namespace Nostreets.Orm.EF
         {
             if (ids == null) throw new ArgumentNullException(nameof(ids));
 
-            Func<T, bool> predicate = a => ids.Any(b => b == a.GetType().GetProperty(PrimaryKeyName).GetValue(a));
-
             using (var context = await EFDBContext<T>.Build(ContextOptions))
             {
-                var list = await context.WhereAsync(predicate);
+                var list = (await context.WhereAsync(MatchesAnyPrimaryKey(ids)))?.ToList();
+                if (list == null || list.Count == 0)
+                    throw new InvalidOperationException(NoRowsMessage(ids));
+
                 await context.DeleteRangeAsync(list);
             }
         }
@@ -476,11 +551,12 @@ namespace Nostreets.Orm.EF
         {
             if (id == null) throw new ArgumentNullException(nameof(id));
 
-            Func<T, bool> predicate = a => a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id;
-
             using (var context = await EFDBContext<T>.Build(ContextOptions))
             {
-                T obj = await context.FirstOrDefaultAsync(predicate);
+                T obj = await context.FirstOrDefaultAsync(MatchesPrimaryKey(id));
+                if (obj == null)
+                    throw new InvalidOperationException(NoRowMessage(id));
+
                 await context.DeleteAsync(obj);
             }
         }
@@ -489,11 +565,14 @@ namespace Nostreets.Orm.EF
         {
             if (ids == null) throw new ArgumentNullException(nameof(ids));
 
-            Func<T, bool> predicate = a => ids.Any(b => (object)b == a.GetType().GetProperty(PrimaryKeyName).GetValue(a));
+            var wanted = ids.Cast<object>().ToList();
 
             using (var context = await EFDBContext<T>.Build(ContextOptions))
             {
-                var list = await context.WhereAsync(predicate);
+                var list = (await context.WhereAsync(MatchesAnyPrimaryKey(wanted)))?.ToList();
+                if (list == null || list.Count == 0)
+                    throw new InvalidOperationException(NoRowsMessage(wanted));
+
                 await context.DeleteRangeAsync(list);
             }
         }

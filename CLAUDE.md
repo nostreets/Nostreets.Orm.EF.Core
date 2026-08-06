@@ -32,11 +32,35 @@ file — **`EFDBService.cs`**, namespace `Nostreets.Orm.EF`. Packaged as `Nostre
 `Get(id)` · `GetAll()` · `Where(Func<T,bool> [, paging/sort])` · `FirstOrDefault(Func<T,bool>)` ·
 `Count(Func<T,bool>?)` · `Insert`/`InsertRange`/`InsertWithId` · `Update`/`UpdateRange` ·
 `Delete(id)`/`DeleteRange(ids)` · `Build()` (ensure table exists) · `Backup(path)` ·
-`QueryResults<TResult>(sql, params)` (raw parameterized SQL).
+**`WhereRaw(sql, params)`** (raw parameterized SQL returning full entities) ·
+`QueryResults<TResult>(sql, params)` (raw parameterized SQL, scalar/unmapped projections).
 
 **Predicates are `Func<T,bool>` (client-side), not `Expression<…>`** — queries materialize then
-filter in memory. Designed for modest result sets; for large tables push filtering into raw SQL
-(`QueryResults`) or a narrower query.
+filter in memory. Designed for modest result sets. **To push a filter into the DATABASE use
+`WhereRaw`** ([D-215], added 2026-08-06) — *not* `QueryResults`, which the old guidance here named:
+`SqlQueryRaw<T>` for unmapped types is an EF 8+ feature, so on the previous EF 7 pin `QueryResults`
+was effectively scalar-only. Two `WhereRaw` constraints, both of which fail at runtime rather than
+compile time: the SQL must project **every** mapped column (`SELECT *`), and values must travel in
+the parameters dictionary, never interpolated. It is a **scan, not automatically a seek** — the win
+is network/allocation/GC, not I/O.
+
+## 🔴 The contract and the implementation are a VERSION PAIR
+
+`IDBService<…>` lives in **`Nostreets.Extensions.Core`**; `EFDBService` implements it here. They ship
+as two packages, so they can be resolved at **different versions** — and that combination compiles
+and then dies at load.
+
+Found 2026-08-06 (A4-1): consumers pin `Nostreets.Extensions.Core` directly but got
+`Nostreets.Orm.EF.Core` only **transitively via `OS.Base.Shared`**, and NuGet resolves a transitive
+range to its **lowest** satisfying version. Every service host therefore restored **contract 1.0.2
+against implementation 1.0.1**. The build was clean — the interface member (`WhereRaw`) was present —
+but `EFDBService` 1.0.1 does not implement it, so the type fails to load at runtime.
+
+**Rule: when you add a member to `IDBService`, bump and publish BOTH packages, and make sure every
+deployed host pins `Nostreets.Orm.EF.Core` DIRECTLY.** All 15 `*.Web.csproj` NugetRef ItemGroups now
+carry that direct pin (same remedy already used there for `OS.Base.Shared`). **Verify by reading the
+host's `obj/project.assets.json`, not by a clean build** — a clean build is exactly what this failure
+mode produces.
 
 ---
 
@@ -71,6 +95,31 @@ filter in memory. Designed for modest result sets; for large tables push filteri
 - **Soft-delete is not auto-enforced:** `Delete` is a true delete; `IsArchived` filtering is the
   caller's responsibility (the `BaseService<T>` cascade sets `IsArchived=true` for orphaned children
   rather than hard-deleting).
+- **Id-keyed hard delete works again as of 2026-08-06 (A4-1 / BUG-68(1)).** All four `Delete` /
+  `DeleteRange` overloads built their predicate as
+  `a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id`, where **both operands are
+  statically `object`** — so `==` bound to **reference** equality. `GetValue` boxes a value-type key
+  into a fresh box each call and EF materialises a fresh `string` per row, so the reference was never
+  the caller's: the predicate matched **no row, ever, for every entity type**, and `dbSet.Remove(null)`
+  threw a bare `ArgumentNullException` naming neither the id nor the table. The default soft path was
+  unaffected (it archives via `Update`), which is why this hid — only `realDelete: true` reaches it.
+  Now routed through `MatchesPrimaryKey` / `MatchesAnyPrimaryKey` (`Equals`, PropertyInfo resolved
+  once off `typeof(T)`), and a genuine miss throws a message naming the row and the table.
+
+## Tests — `Nostreets.Orm.EF.Core.Test`
+
+Two layers, because neither alone is sufficient:
+- **`PrimaryKeyPredicateTests`** — no database. Proves the predicate compares by value across
+  `string` / `int` / `Guid`. 🔴 The "row" values are built **reference-distinct** (`new string(...)`)
+  on purpose: C# interns literals, so a test reusing one instance would have passed under the bug.
+- **`DeleteByIdIntegrationTests`** — hits real SQL Server (local SQLEXPRESS, scratch DB
+  `NostreetsOrmTest`) and proves the overloads actually USE the predicate and that a row really
+  leaves the table. Deliberately **not** skippable when SQL is unreachable: silently passing without
+  a database is exactly the vacuous green [D-193] exists to prevent. Ids are generated per test, so
+  runs never collide.
+
+⚠️ Run `-c Release` and read the `Passed!` line, never the exit code (Smart App Control blocks Debug
+test DLLs and the run exits 0 having executed ZERO tests).
 - **EF Core package version may lag the TFM** (EF Core 7.x on a net8.0 target) — works, but bump with care.
 
 ## Packaging

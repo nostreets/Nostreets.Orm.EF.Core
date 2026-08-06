@@ -391,6 +391,54 @@ namespace Nostreets.Orm.EF
 
             return result;
         }
+
+        /// <summary>
+        /// Runs raw parameterized SQL and materializes the rows as <typeparamref name="T"/> entities.
+        /// </summary>
+        /// <remarks>
+        /// 🔑 WHY THIS EXISTS. <see cref="Where(Func{T, bool})"/> takes a <c>Func</c>, not an
+        /// <c>Expression</c>, so it binds <c>Enumerable.Where</c>: EF emits a bare
+        /// <c>SELECT * FROM [table]</c>, materializes EVERY row, and filters in memory. For a
+        /// predicate that cannot be expressed as a translatable expression at all — a JSON array
+        /// membership test, say — this pushes the filter into the DATABASE instead.
+        ///
+        /// 🔴 THE SQL MUST PROJECT EVERY MAPPED COLUMN OF <typeparamref name="T"/>. <c>FromSqlRaw</c>
+        /// materializes a real entity, so a partial <c>SELECT</c> throws at execution time, not at
+        /// compile time. <c>SELECT *</c> is the safe habit here.
+        ///
+        /// 🔴 PASS VALUES VIA <paramref name="parameters"/>, NEVER BY INTERPOLATING THEM INTO
+        /// <paramref name="sql"/>. This method cannot tell the difference, and the second form is an
+        /// injection hole. Reference them by name in the SQL (e.g. <c>WHERE [Id] = @id</c>).
+        ///
+        /// ⚠️ Server-side filtering is not automatically an INDEX SEEK. Pushing a predicate into SQL
+        /// wins back the network transfer, the allocations and the GC — but if the column cannot be
+        /// indexed (an <c>nvarchar(max)</c> JSON blob, for instance) the database still scans.
+        /// </remarks>
+        /// <example>
+        /// <code>
+        /// var rooms = await Context&lt;ChatRoom&gt;().WhereRaw(
+        ///     @"SELECT * FROM [ChatRoom]
+        ///        WHERE [IsArchived] = 0
+        ///          AND [ChatRoomType] = @type
+        ///          AND EXISTS (SELECT 1 FROM OPENJSON([ActiveUserIds]) WHERE [value] = @userId)",
+        ///     new Dictionary&lt;string, object&gt; { ["type"] = (int)EntityType.User, ["userId"] = userId });
+        /// </code>
+        /// </example>
+        public async Task<List<T>> WhereRaw(string sql, Dictionary<string, object> parameters = null)
+        {
+            if (string.IsNullOrWhiteSpace(sql)) throw new ArgumentNullException(nameof(sql));
+
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+            {
+                // A fresh SqlParameter per call — a SqlParameter instance cannot be reused across
+                // commands, and every context here is created and disposed per operation anyway.
+                SqlParameter[] sqlParameters = parameters == null
+                    ? new SqlParameter[0]
+                    : parameters.Select(a => new SqlParameter(a.Key, a.Value ?? DBNull.Value)).ToArray();
+
+                return await context.Set<T>().FromSqlRaw(sql, sqlParameters).ToListAsync();
+            }
+        }
     }
 
     public class EFDBService<T, IdType> : EFDBService<T>, IDBService<T, IdType> where T : class

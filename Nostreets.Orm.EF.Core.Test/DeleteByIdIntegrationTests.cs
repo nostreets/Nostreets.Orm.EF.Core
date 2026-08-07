@@ -107,6 +107,67 @@ namespace Nostreets.Orm.EF.Core.Test
         }
 
         [Fact]
+        public async Task DeleteIfExists_WhenTheRowExists_RemovesItAndReportsTrue()
+        {
+            var service = await ReadyServiceAsync();
+            var row = NewRow("ifexists-hit");
+            await service.Insert(row);
+
+            (await service.DeleteIfExists(row.Id)).Should().BeTrue("a row was there and should have been deleted");
+            (await service.Get(row.Id)).Should().BeNull();
+        }
+
+        [Fact]
+        public async Task DeleteIfExists_CalledTwice_IsIdempotent()
+        {
+            // THE reason this method exists. Compensation can legitimately run twice — a rollback
+            // that got halfway and was retried, or a restart finishing one a dead process began.
+            // Under Delete's strict contract the second pass throws on rows the first already
+            // removed and can never finish, and the natural workaround is a swallowing try/catch,
+            // which is how AppUserService.RollbackNewUserAsync ended up dead.
+            var service = await ReadyServiceAsync();
+            var row = NewRow("ifexists-twice");
+            await service.Insert(row);
+
+            (await service.DeleteIfExists(row.Id)).Should().BeTrue("first pass finds and removes the row");
+
+            var second = async () => await service.DeleteIfExists(row.Id);
+            await second.Should().NotThrowAsync("a replayed compensation must be able to finish");
+            (await service.DeleteIfExists(row.Id)).Should().BeFalse("nothing left to remove — report it, don't throw");
+        }
+
+        [Fact]
+        public async Task DeleteIfExists_LeavesEveryOtherRowAlone()
+        {
+            // Narrowness: "don't throw when absent" must not become "match anything".
+            var service = await ReadyServiceAsync();
+            var doomed = NewRow("ifexists-doomed");
+            var bystander = NewRow("ifexists-bystander");
+            await service.Insert(doomed);
+            await service.Insert(bystander);
+
+            await service.DeleteIfExists(doomed.Id);
+
+            (await service.Get(doomed.Id)).Should().BeNull();
+            (await service.Get(bystander.Id)).Should().NotBeNull();
+        }
+
+        [Fact]
+        public async Task Delete_StillThrows_WhileDeleteIfExists_DoesNot_ForTheSameMissingId()
+        {
+            // The two contracts must stay distinguishable. If Delete ever quietly becomes a no-op,
+            // ordinary callers lose the signal that their id was wrong — which is the whole reason
+            // the strict overload was kept rather than replaced.
+            var service = await ReadyServiceAsync();
+            var missingId = $"absent-{Guid.NewGuid():N}";
+
+            var strict = async () => await service.Delete(missingId);
+            await strict.Should().ThrowAsync<InvalidOperationException>();
+
+            (await service.DeleteIfExists(missingId)).Should().BeFalse();
+        }
+
+        [Fact]
         public async Task Delete_WhenTheRowIsGenuinelyAbsent_ReportsWhichRowAndWhichTable()
         {
             // Reaching this now MEANS the row is absent, which was never true before — every delete

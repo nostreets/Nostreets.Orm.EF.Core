@@ -320,6 +320,22 @@ namespace Nostreets.Orm.EF
             }
         }
 
+        /// <inheritdoc />
+        public async Task<bool> DeleteIfExists(object id)
+        {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+            {
+                T obj = await context.FirstOrDefaultAsync(MatchesPrimaryKey(id));
+                if (obj == null)
+                    return false;
+
+                await context.DeleteAsync(obj);
+                return true;
+            }
+        }
+
         public async Task DeleteRange(IEnumerable<object> ids)
         {
             if (ids == null) throw new ArgumentNullException(nameof(ids));
@@ -558,6 +574,22 @@ namespace Nostreets.Orm.EF
                     throw new InvalidOperationException(NoRowMessage(id));
 
                 await context.DeleteAsync(obj);
+            }
+        }
+
+        /// <inheritdoc />
+        public async Task<bool> DeleteIfExists(IdType id)
+        {
+            if (id == null) throw new ArgumentNullException(nameof(id));
+
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+            {
+                T obj = await context.FirstOrDefaultAsync(MatchesPrimaryKey(id));
+                if (obj == null)
+                    return false;
+
+                await context.DeleteAsync(obj);
+                return true;
             }
         }
 

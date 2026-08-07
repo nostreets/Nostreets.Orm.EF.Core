@@ -24,8 +24,16 @@ namespace Nostreets.Orm.EF.Core.Test
     [Collection("sql")]
     public class DeleteByIdIntegrationTests
     {
+        // 🔴 `Pooling=false` is deliberate. This suite threw sporadic `SqlException: A transport-level
+        // error has occurred ... the I/O operation has been aborted because of either a thread exit
+        // or an application request` out of SaveChangesAsync — a DIFFERENT test each run, every one
+        // green in isolation. The ORM opens and disposes a context PER OPERATION, so a single test
+        // churns several connections in a few milliseconds; an aborted one goes back to the pool and
+        // the next test gets handed a dead socket. Taking the pool out of the picture removes that.
+        // (Forcing `tcp:` was tried and is wrong here — SQL Express has TCP/IP disabled by default,
+        // so every connection just times out.)
         private const string ConnectionString =
-            @"Server=localhost\SQLEXPRESS;Database=NostreetsOrmTest;Integrated Security=True;TrustServerCertificate=True;";
+            @"Server=localhost\SQLEXPRESS;Database=NostreetsOrmTest;Integrated Security=True;TrustServerCertificate=True;Pooling=false;";
 
         public class OrmDeleteProbe
         {
@@ -33,10 +41,34 @@ namespace Nostreets.Orm.EF.Core.Test
             public string Name { get; set; } = string.Empty;
         }
 
+        private static readonly SemaphoreSlim _resetGate = new(1, 1);
+        private static bool _tableReset;
+
         private static async Task<EFDBService<OrmDeleteProbe, string>> ReadyServiceAsync()
         {
             var service = new EFDBService<OrmDeleteProbe, string>(ConnectionString);
             await service.Build();
+
+            // Clear the probe table ONCE per run. Rows accumulate across runs (ids are per-test, so
+            // nothing collides), but every read here is a client-side scan of the whole table — the
+            // ORM's predicates are Func<T,bool>, not Expression — so an ever-growing table makes the
+            // suite slower and, past a few dozen rows, flaky against Shared Memory. Reset rather than
+            // let the tests quietly depend on how many times they have been run before.
+            if (!_tableReset)
+            {
+                await _resetGate.WaitAsync();
+                try
+                {
+                    if (!_tableReset)
+                    {
+                        foreach (var row in await service.GetAll())
+                            await service.DeleteIfExists(row.Id);
+                        _tableReset = true;
+                    }
+                }
+                finally { _resetGate.Release(); }
+            }
+
             return service;
         }
 

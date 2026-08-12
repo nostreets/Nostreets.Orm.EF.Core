@@ -301,4 +301,52 @@ namespace Nostreets.Orm.EF
         private static string Comment(string sql) =>
             string.Join(" ", sql.Split('\n').Select(a => a.Trim().TrimEnd('\r')));
     }
+
+    /// <summary>
+    /// Writes a run's artifacts. Console FIRST, always — a Container App's filesystem is ephemeral,
+    /// so the summary must land in ContainerAppConsoleLogs_CL even when the file sink cannot write.
+    /// </summary>
+    public static class SchemaMigrationSink
+    {
+        /// <summary>One folder per process boot, so all of a host's tables share a run folder.</summary>
+        public static readonly string RunStampUtc = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss'Z'");
+
+        public static string Write(string directory, string tableName,
+                                   IReadOnlyList<ColumnDrift> drifts, MigrationArtifacts artifacts)
+        {
+            if (drifts.Count == 0)
+                Console.WriteLine($"[SchemaDrift] [{tableName}]: no drift.");
+            else
+            {
+                Console.WriteLine($"[SchemaDrift] [{tableName}]: {drifts.Count} drift(s) — "
+                    + $"{artifacts.AdditiveSafe.Count} additive-safe, "
+                    + $"{drifts.Count(a => a.Kind == ColumnDriftKind.Remove || a.Kind == ColumnDriftKind.Alter)} script-only, "
+                    + $"{drifts.Count(a => a.Kind == ColumnDriftKind.AddBlocked || a.Kind == ColumnDriftKind.Blocked)} blocked.");
+
+                foreach (var d in drifts)
+                    Console.WriteLine($"[SchemaDrift]   [{tableName}].[{d.ColumnName}] {d.Kind}: {d.Reason}");
+            }
+
+            try
+            {
+                var root = string.IsNullOrWhiteSpace(directory)
+                    ? Path.Combine(AppContext.BaseDirectory, "schema-drift")
+                    : directory;
+                var folder = Path.Combine(root, RunStampUtc);
+                Directory.CreateDirectory(folder);
+
+                File.WriteAllText(Path.Combine(folder, $"{tableName}.report.md"), artifacts.Report);
+                File.WriteAllText(Path.Combine(folder, $"{tableName}.forward.sql"), artifacts.ForwardSql);
+                File.WriteAllText(Path.Combine(folder, $"{tableName}.rollback.sql"), artifacts.RollbackSql);
+
+                Console.WriteLine($"[SchemaDrift] [{tableName}]: artifacts -> {folder}");
+                return folder;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[SchemaDrift] [{tableName}]: file sink FAILED ({ex.Message}) — the console summary above is the record for this run.");
+                return null;
+            }
+        }
+    }
 }

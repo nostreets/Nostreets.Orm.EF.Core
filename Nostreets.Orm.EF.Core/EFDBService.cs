@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Nostreets.Extensions.Extend.Basic;
 using Nostreets.Extensions.Extend.Data;
 using Nostreets.Extensions.Interfaces;
@@ -676,6 +677,8 @@ namespace Nostreets.Orm.EF
                 options.MigrationMode = SchemaMigrationMode.Report;
 #pragma warning restore CS0618
 
+            await context.RunSchemaDriftPass(options);
+
             return context;
         }
 
@@ -900,6 +903,134 @@ namespace Nostreets.Orm.EF
                 CheckComplete = true;
         }
 
+        // 0 = pending, 1 = ran (or running). Reset on failure so a FailOnDrift host keeps
+        // refusing on every subsequent operation rather than accidentally passing on the second.
+        private static int _driftPassState = 0;
+
+        /// <summary>
+        /// P1 Job 12 ([D-232]) — the once-per-entity-type drift pass: analyze, write artifacts,
+        /// (AutoApplyAdditive only) execute forward.sql under an applock, then honor FailOnDrift.
+        /// </summary>
+        /// <remarks>
+        /// Executing the REVIEWED script verbatim — not a re-derived statement list — is deliberate:
+        /// what the operator reads is exactly what runs. Its @RunDestructive gate ships closed and
+        /// every additive statement carries a COL_LENGTH guard, so the script is additive-only and
+        /// safely re-runnable by construction.
+        /// </remarks>
+        internal async Task RunSchemaDriftPass(EFDBContextOptions options)
+        {
+            if (options.MigrationMode == SchemaMigrationMode.Off)
+                return;
+
+            if (Interlocked.CompareExchange(ref _driftPassState, 1, 0) != 0)
+                return;
+
+            try
+            {
+                var entityType = Model.FindEntityType(typeof(TContext))
+                    ?? throw new InvalidOperationException($"No EF entity type for {typeof(TContext).Name}.");
+
+                var modelColumns = ModelColumnReader.Read(entityType);
+                var liveColumns = await ReadLiveColumnsAsync();
+
+                // Captured BEFORE any DDL can run — this is the PITR restore point a recovery uses,
+                // so it must predate the change, not describe it.
+                var analyzedAtUtc = DateTime.UtcNow.ToString("O");
+
+                var drifts = SchemaDriftAnalyzer.Analyze(modelColumns, liveColumns);
+                var artifacts = MigrationArtifactWriter.Compose(
+                    TableName, drifts, this.GetService<IMigrationsSqlGenerator>(), analyzedAtUtc, analyzedAtUtc);
+
+                SchemaMigrationSink.Write(options.MigrationArtifactDirectory, TableName, drifts, artifacts);
+
+                IReadOnlyList<ColumnDrift> remaining = drifts;
+                if (options.MigrationMode == SchemaMigrationMode.AutoApplyAdditive && artifacts.AdditiveSafe.Count > 0)
+                {
+                    await ApplyAdditiveUnderLockAsync(artifacts.ForwardSql);
+                    Console.WriteLine($"[SchemaDrift] [{TableName}]: auto-applied {artifacts.AdditiveSafe.Count} additive column(s).");
+                    remaining = drifts.Where(a => a.Kind != ColumnDriftKind.AddSafe).ToList();
+                }
+
+                if (options.FailOnDrift && remaining.Count > 0)
+                    throw new SchemaDriftException(TableName, remaining);
+            }
+            catch
+            {
+                Volatile.Write(ref _driftPassState, 0);
+                throw;
+            }
+        }
+
+        private async Task<List<LiveColumn>> ReadLiveColumnsAsync()
+        {
+            var live = new List<LiveColumn>();
+            var connection = Database.GetDbConnection();
+            var shouldClose = connection.State != ConnectionState.Open;
+
+            if (shouldClose)
+                await connection.OpenAsync();
+
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = @"
+                    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                           NUMERIC_PRECISION, NUMERIC_SCALE, DATETIME_PRECISION, IS_NULLABLE
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @table";
+
+                var parameter = command.CreateParameter();
+                parameter.ParameterName = "@table";
+                parameter.Value = TableName;
+                command.Parameters.Add(parameter);
+
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    live.Add(new LiveColumn(
+                        reader.GetString(0),
+                        SqlTypeNormalizer.FromInformationSchema(
+                            reader.GetString(1),
+                            reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
+                            reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3)),
+                            reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4)),
+                            reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5)),
+                            string.Equals(reader.GetString(6), "YES", StringComparison.OrdinalIgnoreCase))));
+                }
+            }
+            finally
+            {
+                if (shouldClose)
+                    await connection.CloseAsync();
+            }
+
+            return live;
+        }
+
+        /// <summary>
+        /// Scale-to-zero means startup happens constantly and scale-out can boot two replicas at
+        /// once. The applock serializes the DDL, the COL_LENGTH guards make the loser a no-op, and
+        /// XACT_ABORT rolls the whole transaction back on ANY error — including a guard THROW.
+        /// </summary>
+        private async Task ApplyAdditiveUnderLockAsync(string forwardSql)
+        {
+            var sql = $@"
+SET XACT_ABORT ON;
+DECLARE @applockResult int;
+BEGIN TRAN;
+EXEC @applockResult = sp_getapplock
+    @Resource = N'NostreetsOrm_SchemaMigration_{TableName}',
+    @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 60000;
+IF @applockResult < 0
+    THROW 51000, N'Schema-migration applock not acquired for {TableName}.', 1;
+
+{forwardSql}
+
+COMMIT;";
+
+            await Database.ExecuteSqlRawAsync(sql);
+        }
+
         private async Task GenerateEnumTables()
         {
             var enumTypes = typeof(TContext).GetProperties()
@@ -1062,6 +1193,13 @@ namespace Nostreets.Orm.EF
         /// it. Off by default — refusing to boot is an opt-in posture.
         /// </summary>
         public bool FailOnDrift { get; set; } = false;
+
+        /// <summary>
+        /// Root folder for the per-run drift artifacts (report.md / forward.sql / rollback.sql).
+        /// Null uses "schema-drift" beside the app. The console summary is written regardless —
+        /// a Container App's filesystem is ephemeral, so files alone are not evidence.
+        /// </summary>
+        public string MigrationArtifactDirectory { get; set; } = null;
 
         [Obsolete("Superseded by MigrationMode. The destructive drop-and-recreate this flag gated is disarmed: setting it now behaves as MigrationMode = Report.")]
         public bool MigrateIfNotCurrent { get; set; } = false;

@@ -95,9 +95,15 @@ mode produces.
   `SqlColumnShape` (numeric≡decimal, `datetime2`≡`datetime2(7)`, MAX≡-1), and `SchemaDriftAnalyzer`
   classifies drift — `AddSafe` (nullable/defaulted, the ONLY auto-applicable kind) / `AddBlocked` /
   `Remove` (live-only column: indistinguishable from a hand-added one, NEVER auto-dropped) / `Alter` /
-  `Blocked` (PK drift). Destructive DDL is script-only in every mode. The startup hook + artifact
-  generation (report/forward.sql/rollback.sql) are the next increment; the analyzer is pure and
-  fully mutation-proven without a database.
+  `Blocked` (PK drift). Destructive DDL is script-only in every mode. The runtime pass runs ONCE per
+  entity type per process (inside `EFDBContext.Build`): analyze → write artifacts (`report.md` /
+  `forward.sql` / `rollback.sql` to `MigrationArtifactDirectory`, console summary ALWAYS — container
+  filesystems are ephemeral) → under `AutoApplyAdditive`, execute the REVIEWED forward.sql verbatim
+  inside `sp_getapplock` + `SET XACT_ABORT ON` (the closed `@RunDestructive` gate + `COL_LENGTH`
+  guards make it additive-only and replica-race-safe) → honor `FailOnDrift`, which throws
+  `SchemaDriftException` ("must be migrated ... before this host can continue") when drift remains
+  after whatever the mode was allowed to apply. Round-tripped against real SQLEXPRESS with rows in
+  the table (`SchemaMigrationRuntimeTests`); analyzer + writer + hook mutation-proven 15/15.
 - **Per-operation context, single-threaded:** each call builds and disposes its own `EFDBContext`.
   Don't share a context across concurrent operations.
 - **SQL Server only:** the context hardcodes `UseSqlServer`; other providers throw.

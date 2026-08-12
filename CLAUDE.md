@@ -87,8 +87,17 @@ mode produces.
   the entity model if missing. Optionally generates `(Id, Name)` **enum lookup tables** (`CreateEnumTables`)
   and **FK constraints** from `[ForeignKey("Parent.Col")]` (`CreateFKs`). This underpins the host
   startup-ordering dance (`DeferBuildContexts` / `EnsureContextsBuilt` in `BaseService<T>`).
-- **Migration is opt-in and destructive:** with `MigrateIfNotCurrent=true`, a stale schema triggers
-  `SqlMigrationScriptGenerator` which recreates the table — **dropped columns lose data.** Back up first.
+- **The destructive migration path is DISARMED ([D-232], P1 Job 12).** `MigrateIfNotCurrent` is
+  `[Obsolete]` and no longer reaches `SqlMigrationScriptGenerator` — setting it degrades to
+  `SchemaMigrationMode.Report`. Its replacement is `EFDBContextOptions.MigrationMode`
+  (`Off` default / `Report` / `AutoApplyAdditive`) backed by `SchemaMigration.cs`:
+  `SqlTypeNormalizer` reduces EF store types and INFORMATION_SCHEMA rows to one canonical
+  `SqlColumnShape` (numeric≡decimal, `datetime2`≡`datetime2(7)`, MAX≡-1), and `SchemaDriftAnalyzer`
+  classifies drift — `AddSafe` (nullable/defaulted, the ONLY auto-applicable kind) / `AddBlocked` /
+  `Remove` (live-only column: indistinguishable from a hand-added one, NEVER auto-dropped) / `Alter` /
+  `Blocked` (PK drift). Destructive DDL is script-only in every mode. The startup hook + artifact
+  generation (report/forward.sql/rollback.sql) are the next increment; the analyzer is pure and
+  fully mutation-proven without a database.
 - **Per-operation context, single-threaded:** each call builds and disposes its own `EFDBContext`.
   Don't share a context across concurrent operations.
 - **SQL Server only:** the context hardcodes `UseSqlServer`; other providers throw.

@@ -1,4 +1,4 @@
-﻿using System.Configuration;
+using System.Configuration;
 using System.Data;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
@@ -50,11 +50,14 @@ namespace Nostreets.Orm.EF
             if (output != null)
                 throw new Exception(output);
 
-            ContextOptions = new EFDBContextOptions() 
+            // Compat plumbing for the pre-[D-232] ctor shape; Build degrades the flag to Report.
+#pragma warning disable CS0618
+            ContextOptions = new EFDBContextOptions()
             {
                 ConnectionString = connectionString,
                 MigrateIfNotCurrent = migrateIfNotCurrent
             };
+#pragma warning restore CS0618
         }
 
         public EFDBService(EFDBContextOptions options)
@@ -664,12 +667,14 @@ namespace Nostreets.Orm.EF
             var context = new EFDBContext<TContext>(options);
             await context.CheckIfCreated(options);
 
-            if (options.MigrateIfNotCurrent)
-            {
-                var isDBCurrent = context.CheckIfCurrent<TContext>();
-                if (!isDBCurrent)
-                    context.Migrate();
-            }
+            // [D-232] — the destructive CheckIfCurrent → Migrate() path (drop-and-recreate via the
+            // 2017 SqlMigrationScriptGenerator, which silently emptied retyped columns) is DISARMED.
+            // The obsolete flag degrades to Report so a stale schema is never rewritten as a side
+            // effect of constructing a context; drift handling is SchemaMigrationMode's job.
+#pragma warning disable CS0618
+            if (options.MigrateIfNotCurrent && options.MigrationMode == SchemaMigrationMode.Off)
+                options.MigrationMode = SchemaMigrationMode.Report;
+#pragma warning restore CS0618
 
             return context;
         }
@@ -971,11 +976,6 @@ namespace Nostreets.Orm.EF
             return result.Count > 0 && result[0] > 0;
         }
 
-        private void Migrate()
-        {
-            SqlMigrationScriptGenerator.Migrate(Database.GetDbConnection(), TableName, typeof(TContext));
-        }
-
         private bool DoesTableExist(string tableName = null, string schemaName = null)
         {
             tableName = tableName ?? TableName;
@@ -1007,62 +1007,6 @@ namespace Nostreets.Orm.EF
                 result = dataSet[0] > 0;
 
             return result;
-        }
-
-        private bool CheckIfCurrent<T>()
-        {
-            var tableType = typeof(T);
-            var columnDataList = new List<Tuple<string, string>>();
-
-            using (var dbContext = new DbContext(DBContextOptions))
-            {
-                var query = $"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{TableName}'";
-                var connection = dbContext.Database.GetDbConnection();
-
-                connection.Open();
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = query;
-                    command.CommandType = CommandType.Text;
-
-                    using (var reader = command.ExecuteReader())
-                    {
-                        while (reader.Read())
-                        {
-                            columnDataList.Add(new Tuple<string, string>(reader.GetString(0), reader.GetString(1)));
-                        }
-                    }
-                }
-                connection.Close();
-            }
-
-            var classProperties = tableType.GetProperties();
-            var mismatchedProperties = classProperties.Where(property =>
-            {
-                // Exclude properties with the NotMapped attribute
-                if (Attribute.IsDefined(property, typeof(NotMappedAttribute)))
-                    return false;
-
-                var columnData = columnDataList.FirstOrDefault(c => c.Item1 == property.Name);
-
-                if (columnData == null)
-                    return true;
-
-                return !property.PropertyType.MatchDotNetToSqlType(columnData.Item2);
-
-            }).ToList();
-
-            if (mismatchedProperties.Any())
-            {
-                Console.WriteLine("Mismatched properties:");
-                foreach (var property in mismatchedProperties)
-                {
-                    Console.WriteLine($"Property: {property.Name}, Type: {property.PropertyType}");
-                }
-                return false;
-            }
-
-            return true;
         }
 
         private void Configure(ModelBuilder modelBuilder)
@@ -1097,11 +1041,20 @@ namespace Nostreets.Orm.EF
         #endregion
     }
 
-    public class EFDBContextOptions 
+    public class EFDBContextOptions
     {
         public string ConnectionString { get; set; }
         public string TableName { get; set; } = null;
         public int TimeoutInSeconds { get; set; } = 180;
+
+        /// <summary>
+        /// Supersedes <see cref="MigrateIfNotCurrent"/> ([D-232]). Off = today's behaviour; Report
+        /// analyzes drift and writes artifacts without touching the schema; AutoApplyAdditive also
+        /// executes the additive-safe subset. Destructive DDL never runs automatically in any mode.
+        /// </summary>
+        public SchemaMigrationMode MigrationMode { get; set; } = SchemaMigrationMode.Off;
+
+        [Obsolete("Superseded by MigrationMode. The destructive drop-and-recreate this flag gated is disarmed: setting it now behaves as MigrationMode = Report.")]
         public bool MigrateIfNotCurrent { get; set; } = false;
         public bool CreateContextTable { get; set; } = true;
         public bool CreateEnumTables { get; set; } = true;

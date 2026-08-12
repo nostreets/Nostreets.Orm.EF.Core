@@ -13,20 +13,29 @@ The **Entity Framework Core ORM wrapper** that implements `Nostreets.Extensions.
 behind every domain service (services inject `IDBService<TEntity, TId>`; in service hosts that
 resolves to `InternalService<>` in `OS.Base.Services`, which derives from the classes here).
 
-**Framework**: .NET 8.0 (upgraded from net7.0 in Phase 1). The entire implementation is a single
-file — **`EFDBService.cs`**, namespace `Nostreets.Orm.EF`. Packaged as `Nostreets.Orm.EF.Core`.
+**Framework**: .NET 8.0 (upgraded from net7.0 in Phase 1), on **EF Core 9.0.11**. Packaged as
+`Nostreets.Orm.EF.Core`. Everything is namespace `Nostreets.Orm.EF`, across **three** files:
+
+| File | Contains |
+|------|----------|
+| `EFDBService.cs` (~1,309 lines) | The ORM proper — the three `EFDBService<…>` arities, `EFDBContext<T>`, `EFDBContextOptions`, and the drift-pass hook `RunSchemaDriftPass`. |
+| `SchemaMigration.cs` (~527 lines) | The drift **model + analyzer** — `SchemaMigrationMode`, `ColumnDriftKind`, `SqlColumnShape`/`SqlTypeNormalizer`, `SchemaDriftAnalyzer`, `SchemaDriftTally`, `ModelColumnReader`, `SchemaDriftException`, and the four declared-intent attributes. |
+| `SchemaMigrationArtifacts.cs` (~492 lines) | The **artifact composer/writer** — `MigrationArtifacts`, `MigrationArtifactWriter`, and the sink that emits `report.md` / `forward.sql` / `rollback.sql`. |
+
+⚠️ It was a single file until P1 Job 12 ([D-232]) added the schema-drift vertical. Docs and comments
+elsewhere may still say "the entire implementation is one file" — they are stale.
 
 ---
 
-## Public surface (all in `EFDBService.cs`)
+## Public surface
 
 | Type | Role |
 |------|------|
 | `EFDBService<T> : IDBService<T>` | Base wrapper. Async CRUD over a SQL Server table for entity `T`. Detects the primary key at construction. |
 | `EFDBService<T, IdType> : EFDBService<T>, IDBService<T, IdType>` | Adds strongly-typed-id overloads (`Get(IdType)`, `Delete(IdType)`, …). This is the variant OS services use (`IDBService<TEntity, string>`). |
 | `EFDBService<T, IdType, AddType, UpdateType>` | Adds DTO-mapped `Insert(AddType, converter)` / `Update(UpdateType, converter)`. |
-| `EFDBContext<T> : DbContext` | Internal per-operation EF context (create → operate → dispose via the static `Build(...)` factory). Owns table/schema creation, enum-table + FK generation, and migration. |
-| `EFDBContextOptions` | Config bag: `ConnectionString`, `TableName?`, `TimeoutInSeconds` (180), `MigrateIfNotCurrent`, `CreateEnumTables`, `CreateFKs`, … |
+| `EFDBContext<T> : DbContext` | Internal per-operation EF context (create → operate → dispose via the static `Build(...)` factory). Owns table/schema creation, enum-table + FK generation, and the schema-drift pass. |
+| `EFDBContextOptions` | Config bag: `ConnectionString`, `TableName?`, `TimeoutInSeconds` (180), `CreateEnumTables`, `CreateFKs`, and the drift knobs **`MigrationMode`** (`Off`/`Report`/`AutoApplyAdditive`), **`FailOnDrift`**, **`MigrationArtifactDirectory`**. `MigrateIfNotCurrent` is still present but `[Obsolete]` and inert. |
 
 ### CRUD surface (async)
 `Get(id)` · `GetAll()` · `Where(Func<T,bool> [, paging/sort])` · `FirstOrDefault(Func<T,bool>)` ·
@@ -68,8 +77,10 @@ mode produces.
 
 - Implements `IDBService<…>` (from `Nostreets.Extensions.Interfaces`) and persists `DBObject`/
   `IDBObject`-derived entities (audit fields + `IsArchived`).
-- Uses `Basic`/`Data` extensions, `Date/TimeOnly` converters, and `SqlMigrationScriptGenerator`
-  from Extensions.Core.
+- Uses `Basic`/`Data` extensions and `Date/TimeOnly` converters from Extensions.Core. It no longer
+  uses `SqlMigrationScriptGenerator` — that was the 2017 drop-and-recreate generator behind the
+  disarmed migration path, and the only mention left here is the comment at `EFDBService.cs:672`
+  recording what was removed.
 - **Switchable reference (Phase 1 pattern):** the csproj declares
   `<Configurations>Debug;Release;ProjectRef;NugetRef</Configurations>` and conditional ItemGroups —
   a **ProjectReference** to `Nostreets.Extensions.Core` under every config except `NugetRef`, and a
@@ -93,9 +104,16 @@ mode produces.
   (`Off` default / `Report` / `AutoApplyAdditive`) backed by `SchemaMigration.cs`:
   `SqlTypeNormalizer` reduces EF store types and INFORMATION_SCHEMA rows to one canonical
   `SqlColumnShape` (numeric≡decimal, `datetime2`≡`datetime2(7)`, MAX≡-1), and `SchemaDriftAnalyzer`
-  classifies drift — `AddSafe` (nullable/defaulted, the ONLY auto-applicable kind) / `AddBlocked` /
-  `Remove` (live-only column: indistinguishable from a hand-added one, NEVER auto-dropped) / `Alter` /
-  `Blocked` (PK drift). Destructive DDL is script-only in every mode. The runtime pass runs ONCE per
+  classifies drift into **eight** `ColumnDriftKind`s. **Exactly two auto-apply** (the
+  `MigrationArtifacts.AdditiveSafe` subset — "provably cannot lose data", not "is an ADD"):
+  `AddSafe` (nullable/defaulted) and **`AlterSafe`** (a LOSSLESS WIDENING — `nvarchar(n)` growing,
+  `int`→`bigint`, NOT NULL relaxing to NULL, fractional-seconds precision increasing). The other six
+  are script-only in every mode: `AddBlocked` (NOT NULL, no default — cannot succeed on a populated
+  table) / `Remove` (live-only column: indistinguishable from a hand-added one, NEVER auto-dropped) /
+  `Alter` (narrowings + cross-family retypes) / `Rename` (declared `[RenamedFromColumn]` — metadata-only
+  but held back for PACKAGE SKEW: code on the old package still reads the old name) / `Transform`
+  (declared structural change that MOVES DATA — never auto-applies in any mode, permanently) /
+  `Blocked` (PK or ambiguous drift). Destructive DDL is script-only in every mode. The runtime pass runs ONCE per
   entity type per process (inside `EFDBContext.Build`): analyze → write artifacts (`report.md` /
   `forward.sql` / `rollback.sql` to `MigrationArtifactDirectory`, console summary ALWAYS — container
   filesystems are ephemeral) → under `AutoApplyAdditive`, execute the REVIEWED forward.sql verbatim
@@ -104,6 +122,27 @@ mode produces.
   `SchemaDriftException` ("must be migrated ... before this host can continue") when drift remains
   after whatever the mode was allowed to apply. Round-tripped against real SQLEXPRESS with rows in
   the table (`SchemaMigrationRuntimeTests`); analyzer + writer + hook mutation-proven 15/15.
+
+  🔴 **Known defect — the post-apply `remaining` set omits `AlterSafe`.** `EFDBService.cs:954`
+  computes what still needs a human as `drifts.Where(a => a.Kind != ColumnDriftKind.AddSafe)`, but
+  the subset that was just auto-applied is `AddSafe` **or** `AlterSafe` (`SchemaMigration.cs:469`).
+  So on the one run that auto-applies a lossless widening, that widening is still counted as
+  outstanding: with `FailOnDrift` set the host throws `SchemaDriftException` immediately after
+  successfully applying the change, and the pipeline gate reports exit **3 (needs a human)** for work
+  it just did. It self-clears on the next run (the drift is genuinely gone by then), so this is a
+  spurious one-shot failure rather than a stuck state. `SchemaDriftTally` (`:494`) gets the same
+  predicate RIGHT (`is not AddSafe and not AlterSafe`), which is what makes this look like an
+  oversight rather than intent. **Not yet fixed** — it changes DDL/boot behavior, so it is being
+  raised separately rather than folded into a docs pass.
+
+- **Host-side entry point — `--schema-drift-check` ([D-233], lives in `OS.Base.Services`, not here).**
+  `ProgramBase.CreateWebHostBuilder` intercepts the flag, runs `EagerSchemaInitializer.EnsureAllBuilt()`
+  (the same code path as boot, so there is no second implementation to drift from), and exits instead
+  of serving — `docker run <image> --schema-drift-check` is the whole pipeline gate step. **Exit
+  contract:** `0` clean or nothing to check · `2` additive drift auto-applied · `3` drift needs a human
+  · `1` the check itself broke. Note `3` also covers *additive drift seen but NOT applied* (i.e. under
+  `Report`): reporting is not a pass. A host with no EFDB contexts analyzes zero tables and exits `0`,
+  so the gate is self-detecting and vendor services need no opt-out.
 - **Per-operation context, single-threaded:** each call builds and disposes its own `EFDBContext`.
   Don't share a context across concurrent operations.
 - **SQL Server only:** the context hardcodes `UseSqlServer`; other providers throw.
@@ -135,10 +174,13 @@ Two layers, because neither alone is sufficient:
 
 ⚠️ Run `-c Release` and read the `Passed!` line, never the exit code (Smart App Control blocks Debug
 test DLLs and the run exits 0 having executed ZERO tests).
-- **EF Core package version may lag the TFM** (EF Core 7.x on a net8.0 target) — works, but bump with care.
 
 ## Packaging
 
+- **EF Core 9.0.11 on a `net8.0` target** (all three `Microsoft.EntityFrameworkCore*` packages pinned
+  in lockstep; upgraded 7.0.2 → 9.0.11 during P1). EF Core 9 targets net8.0, so the package no longer
+  lags the TFM — bump all three together and re-run the integration tests, since this library leans on
+  provider internals (`IMigrationsSqlGenerator`, `INFORMATION_SCHEMA` shape handling).
 - net8.0; repo-level `Directory.Build.props` (metadata + `<Version>` manual SemVer `1.0.0`);
   `GeneratePackageOnBuild=false` → `dotnet pack <csproj> -c Release -o "C:\Users\Nile O\.nuget-local-feed"`.
 - Same-version dev loop: deleting the cached package under `%USERPROFILE%\.nuget\packages\nostreets.orm.ef.core`
@@ -148,7 +190,12 @@ test DLLs and the run exits 0 having executed ZERO tests).
 
 - Do not pass `Expression<Func<T,bool>>` expecting server-side translation — the API takes
   `Func<T,bool>` and filters in memory.
-- Do not enable `MigrateIfNotCurrent` against a database you can't afford to lose column data from.
+- Do not reach for `MigrateIfNotCurrent` — it is `[Obsolete]` and inert. It can no longer lose column
+  data (it degrades to `MigrationMode = Report`), so the old "not against a database you can't afford
+  to lose" warning no longer applies; it simply is not the knob. Use `EFDBContextOptions.MigrationMode`.
+- Do not treat `AutoApplyAdditive` as "applies every ADD" — the gate is *provably lossless*, so a NOT
+  NULL column with no default (`AddBlocked`) stays script-only, while a lossless widening (`AlterSafe`)
+  does auto-apply despite being an ALTER.
 - Do not share an `EFDBContext` across threads/operations — it's create-op-dispose by design.
 - Do not assume soft-delete filtering — add `IsArchived` predicates (or rely on the consuming
   service's `GenerateData`/cascade) explicitly.

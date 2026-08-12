@@ -188,14 +188,44 @@ namespace Nostreets.Orm.EF
     }
 
     /// <summary>A column as the entity model declares it.</summary>
-    public sealed record ModelColumn(string Name, SqlColumnShape Shape, bool IsPrimaryKey, bool HasDefault);
+    public sealed record ModelColumn(string Name, SqlColumnShape Shape, bool IsPrimaryKey, bool HasDefault,
+                                     string DefaultSql = null);
 
     /// <summary>A column as the live table actually has it.</summary>
     public sealed record LiveColumn(string Name, SqlColumnShape Shape);
 
     /// <summary>One detected difference, with its classification and the reason in words.</summary>
     public sealed record ColumnDrift(string ColumnName, ColumnDriftKind Kind, string Reason,
-                                     SqlColumnShape ModelShape, SqlColumnShape LiveShape);
+                                     SqlColumnShape ModelShape, SqlColumnShape LiveShape,
+                                     string DefaultSql = null);
+
+    /// <summary>
+    /// Thrown at startup when <c>EFDBContextOptions.FailOnDrift</c> is set and drift remains after
+    /// whatever the mode was allowed to apply. Fail-closed by request ([D-232] second pass): running
+    /// against a schema the model does not match is a data-corruption risk, so the host refuses to
+    /// start until the database is migrated.
+    /// </summary>
+    public sealed class SchemaDriftException : Exception
+    {
+        public IReadOnlyList<ColumnDrift> Drifts { get; }
+
+        public SchemaDriftException(string tableName, IReadOnlyList<ColumnDrift> drifts)
+            : base(BuildMessage(tableName, drifts))
+        {
+            Drifts = drifts;
+        }
+
+        private static string BuildMessage(string tableName, IReadOnlyList<ColumnDrift> drifts)
+        {
+            var lines = drifts.Select(a => $"  - {a.ColumnName} [{a.Kind}]: model {a.ModelShape?.ToString() ?? "—"} vs live {a.LiveShape?.ToString() ?? "—"}");
+
+            return $"[{tableName}] does not match its entity model and FailOnDrift is enabled — "
+                 + "the database must be migrated to the correct schema before this host can continue. "
+                 + "Review the drift report and run the generated forward.sql (destructive operations "
+                 + $"are gated behind @RunDestructive).{Environment.NewLine}"
+                 + string.Join(Environment.NewLine, lines);
+        }
+    }
 
     /// <summary>
     /// Compares one entity's model columns against its live table and classifies every difference.
@@ -236,11 +266,11 @@ namespace Nostreets.Orm.EF
                     else if (model.Shape.IsNullable || model.HasDefault)
                         drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.AddSafe,
                             $"New model property; ADD COLUMN {model.Shape} is non-destructive and safe on a populated table.",
-                            model.Shape, null));
+                            model.Shape, null, model.DefaultSql));
                     else
                         drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.AddBlocked,
                             "New model property is NOT NULL with no default — the ADD cannot succeed on a populated table. Give the property a default or make it nullable, then re-run.",
-                            model.Shape, null));
+                            model.Shape, null, model.DefaultSql));
 
                     continue;
                 }
@@ -296,7 +326,8 @@ namespace Nostreets.Orm.EF
                     p.GetColumnName() ?? p.Name,
                     SqlTypeNormalizer.ParseStoreType(p.GetColumnType(), p.IsNullable),
                     pkNames.Contains(p.Name),
-                    p.GetDefaultValue() != null || p.GetDefaultValueSql() != null))
+                    p.GetDefaultValue() != null || p.GetDefaultValueSql() != null,
+                    p.GetDefaultValueSql()))
                 .ToList();
         }
     }

@@ -1054,6 +1054,15 @@ namespace Nostreets.Orm.EF
         /// </summary>
         public SchemaMigrationMode MigrationMode { get; set; } = SchemaMigrationMode.Off;
 
+        /// <summary>
+        /// Fail-closed gate, composable with any mode: when set, startup THROWS
+        /// <see cref="SchemaDriftException"/> if drift remains after whatever the mode was allowed to
+        /// apply. Under AutoApplyAdditive the additive subset self-heals first, so only drift that
+        /// needs a human (drops, retypes, blocked adds) stops the host; under Report ANY drift stops
+        /// it. Off by default — refusing to boot is an opt-in posture.
+        /// </summary>
+        public bool FailOnDrift { get; set; } = false;
+
         [Obsolete("Superseded by MigrationMode. The destructive drop-and-recreate this flag gated is disarmed: setting it now behaves as MigrationMode = Report.")]
         public bool MigrateIfNotCurrent { get; set; } = false;
         public bool CreateContextTable { get; set; } = true;

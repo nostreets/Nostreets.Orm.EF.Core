@@ -306,6 +306,34 @@ namespace Nostreets.Orm.EF
             drifts.Where(a => a.Kind == ColumnDriftKind.AddSafe);
     }
 
+
+    /// <summary>
+    /// Process-wide tallies of what the drift passes saw and did — the aggregate the pipeline
+    /// gate's check mode turns into an exit code (0 clean / 2 additive-applied / 3 needs-human),
+    /// since per-entity passes otherwise surface outcomes only via artifacts and exceptions.
+    /// </summary>
+    public static class SchemaDriftTally
+    {
+        private static int _tablesAnalyzed;
+        private static int _additiveSafeSeen;
+        private static int _humanRequired;
+        private static int _additiveApplied;
+
+        public static int TablesAnalyzed => Volatile.Read(ref _tablesAnalyzed);
+        public static int AdditiveSafeSeen => Volatile.Read(ref _additiveSafeSeen);
+        public static int HumanRequired => Volatile.Read(ref _humanRequired);
+        public static int AdditiveApplied => Volatile.Read(ref _additiveApplied);
+
+        internal static void RecordAnalysis(IReadOnlyCollection<ColumnDrift> drifts)
+        {
+            Interlocked.Increment(ref _tablesAnalyzed);
+            Interlocked.Add(ref _additiveSafeSeen, drifts.Count(a => a.Kind == ColumnDriftKind.AddSafe));
+            Interlocked.Add(ref _humanRequired, drifts.Count(a => a.Kind != ColumnDriftKind.AddSafe));
+        }
+
+        internal static void RecordApplied(int columns) => Interlocked.Add(ref _additiveApplied, columns);
+    }
+
     /// <summary>Extracts <see cref="ModelColumn"/>s from the entity's EF model.</summary>
     /// <remarks>
     /// The EF model — not reflection — is the target truth on purpose: EF has already excluded

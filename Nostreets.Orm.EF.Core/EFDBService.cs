@@ -938,6 +938,7 @@ namespace Nostreets.Orm.EF
                 var analyzedAtUtc = DateTime.UtcNow.ToString("O");
 
                 var drifts = SchemaDriftAnalyzer.Analyze(modelColumns, liveColumns);
+                SchemaDriftTally.RecordAnalysis(drifts);
                 var artifacts = MigrationArtifactWriter.Compose(
                     TableName, drifts, this.GetService<IMigrationsSqlGenerator>(), analyzedAtUtc, analyzedAtUtc);
 
@@ -947,6 +948,7 @@ namespace Nostreets.Orm.EF
                 if (options.MigrationMode == SchemaMigrationMode.AutoApplyAdditive && artifacts.AdditiveSafe.Count > 0)
                 {
                     await ApplyAdditiveUnderLockAsync(artifacts.ForwardSql);
+                    SchemaDriftTally.RecordApplied(artifacts.AdditiveSafe.Count);
                     Console.WriteLine($"[SchemaDrift] [{TableName}]: auto-applied {artifacts.AdditiveSafe.Count} additive column(s).");
                     remaining = drifts.Where(a => a.Kind != ColumnDriftKind.AddSafe).ToList();
                 }

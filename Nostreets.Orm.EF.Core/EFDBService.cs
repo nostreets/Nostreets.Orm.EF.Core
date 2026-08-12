@@ -938,6 +938,7 @@ namespace Nostreets.Orm.EF
                 var analyzedAtUtc = DateTime.UtcNow.ToString("O");
 
                 var drifts = SchemaDriftAnalyzer.Analyze(modelColumns, liveColumns);
+                drifts.AddRange(await SynthesizeDeclaredTransformsAsync(modelColumns));
                 SchemaDriftTally.RecordAnalysis(drifts);
                 var artifacts = MigrationArtifactWriter.Compose(
                     TableName, drifts, this.GetService<IMigrationsSqlGenerator>(), analyzedAtUtc, analyzedAtUtc);
@@ -960,6 +961,82 @@ namespace Nostreets.Orm.EF
             {
                 Volatile.Write(ref _driftPassState, 0);
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// [D-233] fourth pass — declared transformations. Each fires only while its SOURCE still
+        /// exists, so the attributes are self-retiring: after the migration runs everywhere the
+        /// synthesis finds nothing and the attribute is deleted like a completed TODO.
+        /// </summary>
+        private async Task<List<ColumnDrift>> SynthesizeDeclaredTransformsAsync(List<ModelColumn> modelColumns)
+        {
+            var synthesized = new List<ColumnDrift>();
+            var pk = modelColumns.FirstOrDefault(a => a.IsPrimaryKey)?.Name ?? "Id";
+
+            var tableRename = typeof(TContext).GetCustomAttribute<RenamedFromTableAttribute>();
+            if (tableRename != null && DoesTableExist(tableRename.OldName))
+                synthesized.Add(new ColumnDrift($"(table {tableRename.OldName})", ColumnDriftKind.Transform,
+                    $"Declared table rename from '{tableRename.OldName}'. The new table was created empty at boot; the composed script moves the rows, verifies counts, then drops the old table.",
+                    null, null,
+                    ScriptOverride: TransformScriptComposer.RenameTable(
+                        tableRename.OldName, TableName, modelColumns.Select(a => a.Name).ToList())));
+
+            foreach (var prop in typeof(TContext).GetProperties())
+            {
+                var promote = prop.GetCustomAttribute<MigratedFromColumnAttribute>();
+                if (promote != null && await ColumnExistsAsync(promote.SourceTable, promote.SourceColumn))
+                {
+                    // The parent key lands by the estate's FillInMissingIds convention; without the
+                    // property the script would be guessing where the relationship lives.
+                    var fk = $"{promote.SourceTable}Id";
+                    if (!modelColumns.Any(a => string.Equals(a.Name, fk, StringComparison.OrdinalIgnoreCase)))
+                        synthesized.Add(new ColumnDrift(prop.Name, ColumnDriftKind.Blocked,
+                            $"[MigratedFromColumn] declared, but this entity has no '{fk}' property to receive the parent key (the FillInMissingIds convention). Nothing is emitted.",
+                            null, null));
+                    else
+                        synthesized.Add(new ColumnDrift(prop.Name, ColumnDriftKind.Transform,
+                            $"Declared promotion of [{promote.SourceTable}].[{promote.SourceColumn}] into this table's [{prop.Name}]. Copy → count-verify → drop, script-only.",
+                            null, null,
+                            ScriptOverride: TransformScriptComposer.PromoteColumn(
+                                promote.SourceTable, promote.SourceColumn, TableName, prop.Name, fk, pk)));
+                }
+
+                var flatten = prop.GetCustomAttribute<FlattenedFromTableAttribute>();
+                if (flatten != null && DoesTableExist(flatten.SourceTable))
+                    synthesized.Add(new ColumnDrift(prop.Name, ColumnDriftKind.Transform,
+                        $"Declared flattening of [{flatten.SourceTable}] into [{TableName}].[{prop.Name}] as serialized JSON. Copy → count-verify → drop table, script-only. Review the FOR JSON shape against the SerializedList expectations.",
+                        null, null,
+                        ScriptOverride: TransformScriptComposer.FlattenTable(
+                            flatten.SourceTable, TableName, prop.Name, $"{TableName}Id", pk)));
+            }
+
+            return synthesized;
+        }
+
+        private async Task<bool> ColumnExistsAsync(string table, string column)
+        {
+            var connection = Database.GetDbConnection();
+            var shouldClose = connection.State != ConnectionState.Open;
+
+            if (shouldClose)
+                await connection.OpenAsync();
+
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @t AND COLUMN_NAME = @c";
+
+                var t = command.CreateParameter(); t.ParameterName = "@t"; t.Value = table; command.Parameters.Add(t);
+                var c = command.CreateParameter(); c.ParameterName = "@c"; c.Value = column; command.Parameters.Add(c);
+
+                return Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
+            }
+            finally
+            {
+                if (shouldClose)
+                    await connection.CloseAsync();
             }
         }
 
@@ -1042,7 +1119,26 @@ COMMIT;";
             foreach (var enumType in enumTypes) 
             {
                 if (DoesTableExist(enumType.Name))
+                {
+                    // [D-233] taxonomy #13 — the standing landmine: seeding used to fire ONLY when the
+                    // table was missing, so a NEW enum member never got its lookup row and every later
+                    // insert using it failed its FK. Sync additively: INSERT missing members, touch
+                    // nothing else (a renamed member is a display concern, not an FK one).
+                    var existingIds = Database.SqlQueryRaw<int>($"SELECT Id FROM [{enumType.Name}]").ToList();
+                    var missing = Enum.GetValues(enumType).Cast<object>().Where(v => !existingIds.Contains((int)v)).ToList();
+
+                    if (missing.Count > 0)
+                    {
+                        var sync = new StringBuilder();
+                        foreach (var enumValue in missing)
+                            sync.Append($"INSERT INTO {enumType.Name} (Id, Name) VALUES ({(int)enumValue}, '{enumValue}');");
+
+                        await Database.ExecuteSqlRawAsync(sync.ToString());
+                        Console.WriteLine($"[SchemaDrift] [{enumType.Name}]: inserted {missing.Count} missing enum member(s): {string.Join(", ", missing)}.");
+                    }
+
                     continue;
+                }
 
                 var enumValues = Enum.GetValues(enumType);
 

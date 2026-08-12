@@ -36,8 +36,77 @@ namespace Nostreets.Orm.EF
         /// <summary>Present in both with a different shape (type/length/precision/nullability). Script only.</summary>
         Alter,
 
+        /// <summary>
+        /// Shape differs but the change is a LOSSLESS WIDENING (nvarchar(n) growing, int→bigint,
+        /// NOT NULL relaxing to NULL, fractional-seconds precision increasing). Cannot lose data, so
+        /// it joins the auto-apply subset. Narrowings and cross-family retypes stay <see cref="Alter"/>.
+        /// </summary>
+        AlterSafe,
+
+        /// <summary>
+        /// A declared rename ([RenamedFromColumn]). Script-only despite being metadata-only: PACKAGE
+        /// SKEW — code still deployed on the old package reads the old name, so a human times it.
+        /// </summary>
+        Rename,
+
+        /// <summary>
+        /// A declared structural transformation (column→table promotion, table→column flattening,
+        /// table rename) carrying its own composed script. Moves DATA, so it never auto-applies in
+        /// any mode, permanently.
+        /// </summary>
+        Transform,
+
         /// <summary>Drift on a primary-key column, or otherwise ambiguous. Never emitted; report only.</summary>
         Blocked
+    }
+
+    /// <summary>
+    /// P1 Job 12 transformation declarations ([D-233] fourth pass). Schema comparison cannot recover
+    /// INTENT — "column removed" + "new table exists" says nothing about the data's destination — so
+    /// transformations are DECLARED with attributes that travel with the model change that creates
+    /// them, and are SELF-RETIRING: once the migration has run everywhere the source no longer
+    /// exists, the synthesis finds nothing, and the attribute is deleted like a completed TODO.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public sealed class RenamedFromColumnAttribute : Attribute
+    {
+        public string OldName { get; }
+        public RenamedFromColumnAttribute(string oldName) => OldName = oldName;
+    }
+
+    [AttributeUsage(AttributeTargets.Class)]
+    public sealed class RenamedFromTableAttribute : Attribute
+    {
+        public string OldName { get; }
+        public RenamedFromTableAttribute(string oldName) => OldName = oldName;
+    }
+
+    /// <summary>
+    /// Column→table promotion, declared on the RECEIVING property of the new entity. The parent key
+    /// lands in the "{SourceTable}Id" property by the estate's FillInMissingIds convention.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public sealed class MigratedFromColumnAttribute : Attribute
+    {
+        public string SourceTable { get; }
+        public string SourceColumn { get; }
+
+        public MigratedFromColumnAttribute(string sourceTable, string sourceColumn)
+        {
+            SourceTable = sourceTable;
+            SourceColumn = sourceColumn;
+        }
+    }
+
+    /// <summary>
+    /// Table→column flattening, declared on the REAL string bridge column (the SerializedList
+    /// pattern's backing property), naming the child table whose rows serialize into it.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public sealed class FlattenedFromTableAttribute : Attribute
+    {
+        public string SourceTable { get; }
+        public FlattenedFromTableAttribute(string sourceTable) => SourceTable = sourceTable;
     }
 
     /// <summary>
@@ -189,7 +258,7 @@ namespace Nostreets.Orm.EF
 
     /// <summary>A column as the entity model declares it.</summary>
     public sealed record ModelColumn(string Name, SqlColumnShape Shape, bool IsPrimaryKey, bool HasDefault,
-                                     string DefaultSql = null);
+                                     string DefaultSql = null, string RenamedFrom = null);
 
     /// <summary>A column as the live table actually has it.</summary>
     public sealed record LiveColumn(string Name, SqlColumnShape Shape);
@@ -197,7 +266,7 @@ namespace Nostreets.Orm.EF
     /// <summary>One detected difference, with its classification and the reason in words.</summary>
     public sealed record ColumnDrift(string ColumnName, ColumnDriftKind Kind, string Reason,
                                      SqlColumnShape ModelShape, SqlColumnShape LiveShape,
-                                     string DefaultSql = null);
+                                     string DefaultSql = null, string ScriptOverride = null);
 
     /// <summary>
     /// Thrown at startup when <c>EFDBContextOptions.FailOnDrift</c> is set and drift remains after
@@ -255,8 +324,22 @@ namespace Nostreets.Orm.EF
             var liveByName = liveColumns.ToDictionary(a => a.Name, StringComparer.OrdinalIgnoreCase);
             var modelNames = new HashSet<string>(modelColumns.Select(a => a.Name), StringComparer.OrdinalIgnoreCase);
 
+            // Declared renames CONSUME their live source so it never double-reports as a Remove.
+            var consumedByRename = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var model in modelColumns)
             {
+                if (!string.IsNullOrEmpty(model.RenamedFrom)
+                    && !liveByName.ContainsKey(model.Name)
+                    && liveByName.TryGetValue(model.RenamedFrom, out var oldLive))
+                {
+                    consumedByRename.Add(model.RenamedFrom);
+                    drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.Rename,
+                        $"Declared rename from '{model.RenamedFrom}'. sp_rename is metadata-only, but code still deployed on the old package reads the old name (package skew) — so a human times it. Script-only.",
+                        model.Shape, oldLive.Shape));
+                    continue;
+                }
+
                 if (!liveByName.TryGetValue(model.Name, out var live))
                 {
                     if (model.IsPrimaryKey)
@@ -282,6 +365,10 @@ namespace Nostreets.Orm.EF
                     drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.Blocked,
                         $"Primary-key shape differs (model {model.Shape} vs live {live.Shape}). PK changes are never emitted by this pipeline.",
                         model.Shape, live.Shape));
+                else if (IsLosslessWiden(live.Shape, model.Shape))
+                    drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.AlterSafe,
+                        $"Lossless widening: live {live.Shape} → model {model.Shape}. A widening cannot lose data, so it is auto-applicable; narrowings and cross-family retypes are not.",
+                        model.Shape, live.Shape));
                 else
                     drifts.Add(new ColumnDrift(model.Name, ColumnDriftKind.Alter,
                         $"Shape differs: model {model.Shape} vs live {live.Shape}. Retypes/resizes can destroy data, so this is script-only — review and run by hand.",
@@ -290,20 +377,96 @@ namespace Nostreets.Orm.EF
 
             foreach (var live in liveColumns)
             {
-                if (modelNames.Contains(live.Name))
+                if (modelNames.Contains(live.Name) || consumedByRename.Contains(live.Name))
                     continue;
 
                 drifts.Add(new ColumnDrift(live.Name, ColumnDriftKind.Remove,
-                    "Present in the live table, absent from the model. Either a removed DTO property or a column added by hand — the schema cannot tell which, so this is NEVER dropped automatically. Script-only.",
+                    "Present in the live table, absent from the model. Either a removed DTO property, a column PROMOTED to its own table, a RENAME, or a column added by hand — the schema cannot tell which, so this is NEVER dropped automatically. Script-only. "
+                    + "If promoted: declare [MigratedFromColumn] on the receiving property and the complete copy-before-drop script is generated. If renamed: declare [RenamedFromColumn] on the new property. Otherwise finish the scaffold by hand — the data copy must run BEFORE any drop.",
                     null, live.Shape));
+            }
+
+            // Tier-1 rename detection: an Add and a Remove of the SAME shape in one table is probably
+            // a rename nobody declared. Classifications stay conservative (the add applies EMPTY, the
+            // data stays safe in the "removed" column) — the reasons teach the declaration that makes
+            // it whole.
+            foreach (var add in drifts.Where(a => a.Kind is ColumnDriftKind.AddSafe or ColumnDriftKind.AddBlocked).ToList())
+            {
+                var twin = drifts.FirstOrDefault(a => a.Kind == ColumnDriftKind.Remove
+                    && a.LiveShape != null && add.ModelShape != null
+                    && a.LiveShape.SameShapeAs(add.ModelShape));
+
+                if (twin == null)
+                    continue;
+
+                var idx = drifts.IndexOf(add);
+                drifts[idx] = add with
+                {
+                    Reason = add.Reason + $" ⚠️ Same shape as removed column '{twin.ColumnName}' — if this is a RENAME, declare [RenamedFromColumn(\"{twin.ColumnName}\")] instead; as-is the new column arrives EMPTY and the data stays in '{twin.ColumnName}'."
+                };
             }
 
             return drifts;
         }
 
-        /// <summary>The subset a startup run may execute when the mode is AutoApplyAdditive.</summary>
+        /// <summary>
+        /// True only for changes that provably cannot lose data: same-family length growth (to a
+        /// bigger n or MAX), the integer ladder upward (tinyint→smallint→int→bigint), decimal growth
+        /// that shrinks neither the integer digits nor the scale, fractional-seconds precision
+        /// growth, datetime→datetime2, and NOT NULL relaxing to NULL. Everything else is a lossy or
+        /// unknowable change and stays script-only.
+        /// </summary>
+        internal static bool IsLosslessWiden(SqlColumnShape live, SqlColumnShape model)
+        {
+            // NULL → NOT NULL is a TIGHTENING (existing NULLs would fail it); never safe here.
+            if (live.IsNullable && !model.IsNullable)
+                return false;
+
+            if (live.TypeName == model.TypeName)
+            {
+                // Same type, nullability relaxed only.
+                if (live.Length == model.Length && live.Precision == model.Precision && live.Scale == model.Scale)
+                    return true;
+
+                if (live.Length.HasValue && model.Length.HasValue)
+                    return model.Length == SqlColumnShape.Max
+                        || (live.Length != SqlColumnShape.Max && model.Length > live.Length);
+
+                if (live.Precision.HasValue && model.Precision.HasValue)
+                {
+                    if (live.Scale.HasValue || model.Scale.HasValue)
+                        // decimal: integer digits (p - s) and scale must both grow-or-hold.
+                        return model.Precision >= live.Precision
+                            && (model.Scale ?? 0) >= (live.Scale ?? 0)
+                            && (model.Precision - (model.Scale ?? 0)) >= (live.Precision - (live.Scale ?? 0));
+
+                    // datetime2/datetimeoffset/time fractional-seconds precision growth.
+                    return model.Precision > live.Precision;
+                }
+
+                return false;
+            }
+
+            // The integer ladder, upward only.
+            int Rank(string t) => t switch { "tinyint" => 0, "smallint" => 1, "int" => 2, "bigint" => 3, _ => -1 };
+            var liveRank = Rank(live.TypeName);
+            if (liveRank >= 0 && Rank(model.TypeName) > liveRank)
+                return true;
+
+            // datetime2 holds every datetime value at precision >= 3.
+            if (live.TypeName == "datetime" && model.TypeName == "datetime2" && (model.Precision ?? 7) >= 3)
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// The subset a startup run may execute when the mode is AutoApplyAdditive: safe ADDs plus
+        /// lossless widenings. The name predates AlterSafe; the CONTRACT is "provably cannot lose
+        /// data", and nothing outside that contract may ever join this set.
+        /// </summary>
         public static IEnumerable<ColumnDrift> AdditiveSafe(IEnumerable<ColumnDrift> drifts) =>
-            drifts.Where(a => a.Kind == ColumnDriftKind.AddSafe);
+            drifts.Where(a => a.Kind is ColumnDriftKind.AddSafe or ColumnDriftKind.AlterSafe);
     }
 
 
@@ -327,8 +490,8 @@ namespace Nostreets.Orm.EF
         internal static void RecordAnalysis(IReadOnlyCollection<ColumnDrift> drifts)
         {
             Interlocked.Increment(ref _tablesAnalyzed);
-            Interlocked.Add(ref _additiveSafeSeen, drifts.Count(a => a.Kind == ColumnDriftKind.AddSafe));
-            Interlocked.Add(ref _humanRequired, drifts.Count(a => a.Kind != ColumnDriftKind.AddSafe));
+            Interlocked.Add(ref _additiveSafeSeen, drifts.Count(a => a.Kind is ColumnDriftKind.AddSafe or ColumnDriftKind.AlterSafe));
+            Interlocked.Add(ref _humanRequired, drifts.Count(a => a.Kind is not ColumnDriftKind.AddSafe and not ColumnDriftKind.AlterSafe));
         }
 
         internal static void RecordApplied(int columns) => Interlocked.Add(ref _additiveApplied, columns);
@@ -355,7 +518,9 @@ namespace Nostreets.Orm.EF
                     SqlTypeNormalizer.ParseStoreType(p.GetColumnType(), p.IsNullable),
                     pkNames.Contains(p.Name),
                     p.GetDefaultValue() != null || p.GetDefaultValueSql() != null,
-                    p.GetDefaultValueSql()))
+                    p.GetDefaultValueSql(),
+                    p.PropertyInfo?.GetCustomAttributes(typeof(RenamedFromColumnAttribute), true)
+                        .Cast<RenamedFromColumnAttribute>().FirstOrDefault()?.OldName))
                 .ToList();
         }
     }

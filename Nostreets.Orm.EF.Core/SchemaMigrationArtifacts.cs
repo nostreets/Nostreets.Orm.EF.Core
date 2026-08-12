@@ -80,6 +80,9 @@ namespace Nostreets.Orm.EF
             ColumnDriftKind.AddBlocked => "withheld — needs a default or nullability first",
             ColumnDriftKind.Remove => "script-only, behind @RunDestructive",
             ColumnDriftKind.Alter => "script-only, behind @RunDestructive",
+            ColumnDriftKind.AlterSafe => "auto-apply candidate (lossless widening, mode-gated)",
+            ColumnDriftKind.Rename => "script-only, behind @RunDestructive (package skew)",
+            ColumnDriftKind.Transform => "script-only, behind @RunDestructive (moves data)",
             _ => "never emitted — investigate by hand"
         };
 
@@ -127,6 +130,28 @@ namespace Nostreets.Orm.EF
                         sb.AppendLine("IF @RunDestructive = 1");
                         sb.AppendLine("BEGIN");
                         sb.AppendLine(Indent(GenerateAlter(ddl, table, d.ColumnName, d.ModelShape)));
+                        sb.AppendLine("END");
+                        break;
+
+                    case ColumnDriftKind.AlterSafe:
+                        // Ungated on purpose: a lossless widening cannot lose data, so it belongs to
+                        // the same auto section as AddSafe. Re-running an ALTER to the same type is a
+                        // metadata no-op, so replica races stay harmless.
+                        sb.AppendLine(GenerateAlter(ddl, table, d.ColumnName, d.ModelShape));
+                        break;
+
+                    case ColumnDriftKind.Rename:
+                        sb.AppendLine("IF @RunDestructive = 1");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine(Indent(d.ScriptOverride
+                            ?? TransformScriptComposer.RenameColumn(table, RenameSourceOf(d), d.ColumnName, newAlreadyExists: false)));
+                        sb.AppendLine("END");
+                        break;
+
+                    case ColumnDriftKind.Transform:
+                        sb.AppendLine("IF @RunDestructive = 1");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine(Indent(d.ScriptOverride ?? "-- (no script composed — see the banner)"));
                         sb.AppendLine("END");
                         break;
 
@@ -185,6 +210,27 @@ namespace Nostreets.Orm.EF
                         sb.AppendLine(GenerateAlter(ddl, table, d.ColumnName, d.LiveShape));
                         break;
 
+                    case ColumnDriftKind.AlterSafe:
+                        // The inverse of a widening is a NARROWING — values written since may truncate
+                        // or fail conversion, so the rollback is @Force-gated even though the forward
+                        // ran automatically.
+                        sb.AppendLine("IF @Force = 1");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine(Indent(GenerateAlter(ddl, table, d.ColumnName, d.LiveShape)));
+                        sb.AppendLine("END");
+                        break;
+
+                    case ColumnDriftKind.Rename:
+                        sb.AppendLine("IF @Force = 1");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine(Indent(TransformScriptComposer.RenameColumn(table, d.ColumnName, RenameSourceOf(d), newAlreadyExists: false)));
+                        sb.AppendLine("END");
+                        break;
+
+                    case ColumnDriftKind.Transform:
+                        sb.AppendLine("-- Transformations move data; there is no structural inverse. Roll back via the point-in-time restore at the restore point above.");
+                        break;
+
                     default:
                         sb.AppendLine("-- BLOCKED in forward.sql; nothing to invert.");
                         break;
@@ -197,6 +243,16 @@ namespace Nostreets.Orm.EF
                 sb.AppendLine("-- No drift. Nothing to invert.");
 
             return sb.ToString();
+        }
+
+        // A Rename drift's source travels in its reason ("Declared rename from 'Old'.") — parsing it
+        // here keeps ColumnDrift lean for every other kind. A missing quote pair means a synthesized
+        // drift, which always carries ScriptOverride instead.
+        private static string RenameSourceOf(ColumnDrift d)
+        {
+            var open = d.Reason.IndexOf('\'');
+            var close = open < 0 ? -1 : d.Reason.IndexOf('\'', open + 1);
+            return close < 0 ? d.ColumnName : d.Reason[(open + 1)..close];
         }
 
         /// <summary>
@@ -300,6 +356,90 @@ namespace Nostreets.Orm.EF
 
         private static string Comment(string sql) =>
             string.Join(" ", sql.Split('\n').Select(a => a.Trim().TrimEnd('\r')));
+    }
+
+
+    /// <summary>
+    /// Composes the data-moving scripts for DECLARED transformations ([D-233] fourth pass). Pure over
+    /// its inputs so every script shape is testable without a database. Every script follows one
+    /// contract: COPY → VERIFY COUNTS (THROW on mismatch) → only then the guarded destructive step.
+    /// These run only inside forward.sql's @RunDestructive gate — data movement never auto-applies.
+    /// </summary>
+    public static class TransformScriptComposer
+    {
+        /// <summary>Column→table promotion: each non-null source value becomes a row in the new table.</summary>
+        public static string PromoteColumn(string sourceTable, string sourceColumn,
+                                           string targetTable, string targetColumn,
+                                           string parentKeyColumn, string targetPkColumn)
+        {
+            return $@"-- PROMOTION [{sourceTable}].[{sourceColumn}] → [{targetTable}].[{targetColumn}] (parent key: [{parentKeyColumn}])
+IF COL_LENGTH(N'[dbo].[{sourceTable}]', N'{sourceColumn}') IS NOT NULL
+BEGIN
+    INSERT INTO [dbo].[{targetTable}] ([{targetPkColumn}], [{parentKeyColumn}], [{targetColumn}], [DateCreated], [DateModified], [CreatedBy], [ModifiedBy], [IsArchived])
+    SELECT CONVERT(nvarchar(450), NEWID()), s.[{targetPkColumn}], s.[{sourceColumn}], SYSUTCDATETIME(), SYSUTCDATETIME(), N'schema-migration', N'schema-migration', 0
+    FROM [dbo].[{sourceTable}] s
+    WHERE s.[{sourceColumn}] IS NOT NULL;
+
+    IF (SELECT COUNT(*) FROM [dbo].[{targetTable}] WHERE [CreatedBy] = N'schema-migration') <>
+       (SELECT COUNT(*) FROM [dbo].[{sourceTable}] WHERE [{sourceColumn}] IS NOT NULL)
+        THROW 50003, N'Promotion count mismatch for [{sourceTable}].[{sourceColumn}] → [{targetTable}] — the source column was NOT dropped. Investigate before re-running.', 1;
+
+    ALTER TABLE [dbo].[{sourceTable}] DROP COLUMN [{sourceColumn}];
+END";
+        }
+
+        /// <summary>
+        /// Table→column flattening: child rows serialize into the parent's bridge column as a JSON
+        /// array (the SerializedList shape), then the child table drops.
+        /// </summary>
+        public static string FlattenTable(string sourceTable, string parentTable,
+                                          string bridgeColumn, string parentKeyColumn, string parentPkColumn)
+        {
+            return $@"-- FLATTENING [{sourceTable}] → [{parentTable}].[{bridgeColumn}] (matched on [{sourceTable}].[{parentKeyColumn}])
+-- ⚠️ Review the FOR JSON shape against the SerializedList<T> the bridge deserializes — property-name
+-- casing must match the entity's JSON expectations before running.
+IF OBJECT_ID(N'[dbo].[{sourceTable}]', N'U') IS NOT NULL
+BEGIN
+    UPDATE p SET p.[{bridgeColumn}] =
+        (SELECT * FROM [dbo].[{sourceTable}] c WHERE c.[{parentKeyColumn}] = p.[{parentPkColumn}] FOR JSON PATH)
+    FROM [dbo].[{parentTable}] p;
+
+    IF (SELECT COUNT(*) FROM [dbo].[{parentTable}] WHERE [{bridgeColumn}] IS NOT NULL) <>
+       (SELECT COUNT(DISTINCT [{parentKeyColumn}]) FROM [dbo].[{sourceTable}])
+        THROW 50004, N'Flattening count mismatch for [{sourceTable}] → [{parentTable}].[{bridgeColumn}] — the child table was NOT dropped. Investigate before re-running.', 1;
+
+    DROP TABLE [dbo].[{sourceTable}];
+END";
+        }
+
+        /// <summary>Declared table rename: the empty new table was already created at boot; copy, verify, drop.</summary>
+        public static string RenameTable(string oldTable, string newTable, IReadOnlyList<string> columnNames)
+        {
+            var cols = string.Join(", ", columnNames.Select(a => $"[{a}]"));
+
+            return $@"-- TABLE RENAME [{oldTable}] → [{newTable}] (the new table was created empty at boot; this moves the rows)
+IF OBJECT_ID(N'[dbo].[{oldTable}]', N'U') IS NOT NULL
+BEGIN
+    INSERT INTO [dbo].[{newTable}] ({cols})
+    SELECT {cols} FROM [dbo].[{oldTable}];
+
+    IF (SELECT COUNT(*) FROM [dbo].[{newTable}]) < (SELECT COUNT(*) FROM [dbo].[{oldTable}])
+        THROW 50005, N'Table-rename copy mismatch for [{oldTable}] → [{newTable}] — the old table was NOT dropped.', 1;
+
+    DROP TABLE [dbo].[{oldTable}];
+END";
+        }
+
+        /// <summary>Declared column rename. sp_rename when only the old column exists; copy-then-drop when both do.</summary>
+        public static string RenameColumn(string table, string oldName, string newName, bool newAlreadyExists)
+        {
+            if (!newAlreadyExists)
+                return $@"EXEC sp_rename N'[dbo].[{table}].[{oldName}]', N'{newName}', 'COLUMN';";
+
+            return $@"-- Both columns exist (the rename was declared after the new column was created empty) — copy, then drop the old.
+UPDATE [dbo].[{table}] SET [{newName}] = [{oldName}] WHERE [{newName}] IS NULL;
+ALTER TABLE [dbo].[{table}] DROP COLUMN [{oldName}];";
+        }
     }
 
     /// <summary>

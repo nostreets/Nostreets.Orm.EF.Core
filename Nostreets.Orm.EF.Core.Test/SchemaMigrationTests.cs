@@ -210,9 +210,12 @@ namespace Nostreets.Orm.EF.Core.Test
                     Pk,
                     Model("NewNullable", "nvarchar(max)"),
                     Model("NewRequired", "int", nullable: false),
-                    Model("Retyped", "bigint")
+                    // NARROWING on purpose: bigint -> int can lose data, so it must stay OUT of
+                    // the auto set. (The widening direction is AlterSafe and IS in the set - covered
+                    // in SchemaTransformTests.)
+                    Model("Retyped", "int")
                 },
-                new[] { LivePk, Live("Retyped", "int"), Live("Orphan", "bit") });
+                new[] { LivePk, Live("Retyped", "bigint"), Live("Orphan", "bit") });
 
             SchemaDriftAnalyzer.AdditiveSafe(drifts).Should().ContainSingle()
                 .Which.ColumnName.Should().Be("NewNullable");

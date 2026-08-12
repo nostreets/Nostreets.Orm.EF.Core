@@ -238,5 +238,118 @@ namespace Nostreets.Orm.EF.Core.Test
             }
         }
         #endregion
+
+        #region AlterSafe — a lossless widening auto-applies with the data intact
+        private sealed class WidenV1
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public int Count { get; set; }
+        }
+
+        private sealed class WidenV2
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public long Count { get; set; }
+        }
+
+        [Fact]
+        public async Task AlterSafe_WidensTheColumnAutomatically_AndTheValueSurvives()
+        {
+            var table = $"SchemaWidenProbe_{RunSuffix}";
+            try
+            {
+                var v1 = new EFDBService<WidenV1, string>(Options(table, SchemaMigrationMode.Off));
+                await v1.Build(Options(table, SchemaMigrationMode.Off));
+                await v1.Insert(new WidenV1 { Id = "row-1", Count = 42 });
+
+                var v2 = new EFDBService<WidenV2, string>(Options(table, SchemaMigrationMode.AutoApplyAdditive));
+                await v2.Build(Options(table, SchemaMigrationMode.AutoApplyAdditive));
+
+                using var connection = new SqlConnection(ConnectionString);
+                await connection.OpenAsync();
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @t AND COLUMN_NAME = 'Count'";
+                command.Parameters.AddWithValue("@t", table);
+                ((string)await command.ExecuteScalarAsync()).Should().Be("bigint",
+                    "int -> bigint is a lossless widening and joins the auto set");
+
+                var survivor = await v2.Get("row-1");
+                survivor.Count.Should().Be(42, "widening must not disturb existing values");
+            }
+            finally
+            {
+                await DropTable(table);
+            }
+        }
+        #endregion
+
+        #region Enum lookup sync — the standing landmine, healed additively
+        // Values are FIXED ids; the enum type name IS the lookup table name, so the type is unique to
+        // this suite to keep the scratch DB honest across runs.
+        private enum SchemaSyncProbeEnum
+        {
+            First = 1,
+            Second = 2,
+            Third = 3
+        }
+
+        private sealed class EnumHostA
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public SchemaSyncProbeEnum Kind { get; set; }
+        }
+
+        private sealed class EnumHostB
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public SchemaSyncProbeEnum Kind { get; set; }
+        }
+
+        [Fact]
+        public async Task EnumSync_ReInsertsAMissingMember_InsteadOfLeavingTheFkLandmine()
+        {
+            var tableA = $"SchemaEnumProbeA_{RunSuffix}";
+            var tableB = $"SchemaEnumProbeB_{RunSuffix}";
+            try
+            {
+                // A creates and seeds the lookup table.
+                var a = new EFDBService<EnumHostA, string>(Options(tableA, SchemaMigrationMode.Off));
+                await a.Build(Options(tableA, SchemaMigrationMode.Off));
+
+                // Gut one member — the exact state that used to make every later insert of that
+                // value fail its FK forever, because seeding fired only when the TABLE was missing.
+                using (var connection = new SqlConnection(ConnectionString))
+                {
+                    await connection.OpenAsync();
+                    using var gut = connection.CreateCommand();
+                    gut.CommandText = "DELETE FROM [SchemaSyncProbeEnum] WHERE Id = 2";
+                    (await gut.ExecuteNonQueryAsync()).Should().Be(1, "the seed row must have existed to delete");
+                }
+
+                // B (a different entity sharing the enum) boots — the sync must heal the gap.
+                var b = new EFDBService<EnumHostB, string>(Options(tableB, SchemaMigrationMode.Off));
+                await b.Build(Options(tableB, SchemaMigrationMode.Off));
+
+                using (var connection = new SqlConnection(ConnectionString))
+                {
+                    await connection.OpenAsync();
+                    using var check = connection.CreateCommand();
+                    check.CommandText = "SELECT COUNT(*) FROM [SchemaSyncProbeEnum] WHERE Id = 2 AND Name = 'Second'";
+                    ((int)await check.ExecuteScalarAsync()).Should().Be(1,
+                        "a missing enum member is an additive INSERT, not a permanent FK landmine");
+                }
+            }
+            finally
+            {
+                await DropTable(tableA);
+                await DropTable(tableB);
+            }
+        }
+        #endregion
     }
 }

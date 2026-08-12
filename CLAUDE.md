@@ -123,17 +123,17 @@ mode produces.
   after whatever the mode was allowed to apply. Round-tripped against real SQLEXPRESS with rows in
   the table (`SchemaMigrationRuntimeTests`); analyzer + writer + hook mutation-proven 15/15.
 
-  🔴 **Known defect — the post-apply `remaining` set omits `AlterSafe`.** `EFDBService.cs:954`
-  computes what still needs a human as `drifts.Where(a => a.Kind != ColumnDriftKind.AddSafe)`, but
-  the subset that was just auto-applied is `AddSafe` **or** `AlterSafe` (`SchemaMigration.cs:469`).
-  So on the one run that auto-applies a lossless widening, that widening is still counted as
-  outstanding: with `FailOnDrift` set the host throws `SchemaDriftException` immediately after
-  successfully applying the change, and the pipeline gate reports exit **3 (needs a human)** for work
-  it just did. It self-clears on the next run (the drift is genuinely gone by then), so this is a
-  spurious one-shot failure rather than a stuck state. `SchemaDriftTally` (`:494`) gets the same
-  predicate RIGHT (`is not AddSafe and not AlterSafe`), which is what makes this look like an
-  oversight rather than intent. **Not yet fixed** — it changes DDL/boot behavior, so it is being
-  raised separately rather than folded into a docs pass.
+  🔴 **The post-apply `remaining` set must be SUBTRACTED, never re-derived (fixed 2026-08-12).**
+  What still needs a human, after auto-apply ran, is computed as
+  `drifts.Where(a => !artifacts.AdditiveSafe.Contains(a))` — the same set `forward.sql` was composed
+  from. It previously repeated the kind list as `Kind != AddSafe`, which omitted **`AlterSafe`**: on
+  the one run that auto-applied a lossless widening, that widening stayed counted as outstanding, so
+  `FailOnDrift` threw `SchemaDriftException` *immediately after the widening succeeded* and the
+  pipeline gate reported exit **3 (needs a human)** for work it had just completed. (It self-cleared
+  next run, so it was a spurious one-shot failure, not a stuck state.) `SchemaDriftTally` (`:494`)
+  had the predicate right all along — two predicates for one contract is what let them diverge.
+  **Rule: never restate the auto-apply kind list. Subtract `artifacts.AdditiveSafe`.** Regression
+  test: `SchemaMigrationRuntimeTests.AlterSafe_ThatWasJustAutoApplied_DoesNotStillTripFailOnDrift`.
 
 - **Host-side entry point — `--schema-drift-check` ([D-233], lives in `OS.Base.Services`, not here).**
   `ProgramBase.CreateWebHostBuilder` intercepts the flag, runs `EagerSchemaInitializer.EnsureAllBuilt()`

@@ -951,7 +951,14 @@ namespace Nostreets.Orm.EF
                     await ApplyAdditiveUnderLockAsync(artifacts.ForwardSql);
                     SchemaDriftTally.RecordApplied(artifacts.AdditiveSafe.Count);
                     Console.WriteLine($"[SchemaDrift] [{TableName}]: auto-applied {artifacts.AdditiveSafe.Count} additive column(s).");
-                    remaining = drifts.Where(a => a.Kind != ColumnDriftKind.AddSafe).ToList();
+                    // Subtract what the script just executed — derived from artifacts.AdditiveSafe,
+                    // the SAME set forward.sql was composed from, so it can never fall out of step
+                    // with the "provably cannot lose data" contract. It previously repeated the kind
+                    // list here and omitted AlterSafe, so a lossless widening stayed counted as
+                    // outstanding: FailOnDrift threw immediately after the widening succeeded, and the
+                    // pipeline gate reported needs-a-human for work it had just completed.
+                    var applied = artifacts.AdditiveSafe.ToHashSet();
+                    remaining = drifts.Where(a => !applied.Contains(a)).ToList();
                 }
 
                 if (options.FailOnDrift && remaining.Count > 0)

@@ -284,6 +284,60 @@ namespace Nostreets.Orm.EF.Core.Test
                 await DropTable(table);
             }
         }
+
+        // Distinct types: the drift pass is guarded by a static per closed generic type, so reusing
+        // WidenV2 here would inherit the previous test's already-ran state and pass vacuously.
+        private sealed class WidenGateV1
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public int Count { get; set; }
+        }
+
+        private sealed class WidenGateV2
+        {
+            [Key]
+            public string Id { get; set; } = null!;
+            public long Count { get; set; }
+        }
+
+        [Fact]
+        public async Task AlterSafe_ThatWasJustAutoApplied_DoesNotStillTripFailOnDrift()
+        {
+            var table = $"SchemaWidenGateProbe_{RunSuffix}";
+            try
+            {
+                var v1 = new EFDBService<WidenGateV1, string>(Options(table, SchemaMigrationMode.Off));
+                await v1.Build(Options(table, SchemaMigrationMode.Off));
+                await v1.Insert(new WidenGateV1 { Id = "row-1", Count = 7 });
+
+                // AutoApplyAdditive resolves the widening itself, so by the time FailOnDrift is
+                // evaluated there is nothing left outstanding for it to refuse to boot over.
+                var v2 = new EFDBService<WidenGateV2, string>(
+                    Options(table, SchemaMigrationMode.AutoApplyAdditive, failOnDrift: true));
+                Func<Task> act = () => v2.Build(
+                    Options(table, SchemaMigrationMode.AutoApplyAdditive, failOnDrift: true));
+
+                await act.Should().NotThrowAsync<SchemaDriftException>(
+                    "an AlterSafe drift is in the subset auto-apply just executed, so counting it as "
+                    + "still-needs-a-human fails the host for work it had already completed");
+
+                // Guards against a vacuous green: if the pass had silently not run, nothing would
+                // have thrown either. The widening must actually be on the table.
+                using var connection = new SqlConnection(ConnectionString);
+                await connection.OpenAsync();
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @t AND COLUMN_NAME = 'Count'";
+                command.Parameters.AddWithValue("@t", table);
+                ((string)await command.ExecuteScalarAsync()).Should().Be("bigint",
+                    "the test is only meaningful if the widening genuinely auto-applied");
+            }
+            finally
+            {
+                await DropTable(table);
+            }
+        }
         #endregion
 
         #region Enum lookup sync — the standing landmine, healed additively

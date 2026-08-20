@@ -204,7 +204,7 @@ namespace Nostreets.Orm.EF
             {
                 try
                 {
-                    return await context.CountTranslatedAsync(predicate);
+                    return await context.CountQueryableAsync(predicate);
                 }
                 catch (InvalidOperationException ex) when (IsUntranslatable(ex))
                 {
@@ -433,7 +433,7 @@ namespace Nostreets.Orm.EF
             {
                 try
                 {
-                    return (await context.WhereTranslatedAsync(predicate)).ToList();
+                    return (await context.WhereQueryableAsync(predicate)).ToList();
                 }
                 catch (InvalidOperationException ex) when (IsUntranslatable(ex))
                 {
@@ -483,7 +483,7 @@ namespace Nostreets.Orm.EF
                 {
                     try
                     {
-                        return (await context.WhereTranslatedAsync(predicate, pageSize, pageOffset, orderByKey, desc)).ToList();
+                        return (await context.WhereQueryableAsync(predicate, pageSize, pageOffset, orderByKey, desc)).ToList();
                     }
                     catch (InvalidOperationException ex) when (IsUntranslatable(ex))
                     {
@@ -512,7 +512,7 @@ namespace Nostreets.Orm.EF
             {
                 try
                 {
-                    return await context.FirstOrDefaultTranslatedAsync(predicate);
+                    return await context.FirstOrDefaultQueryableAsync(predicate);
                 }
                 catch (InvalidOperationException ex) when (IsUntranslatable(ex))
                 {
@@ -823,6 +823,16 @@ namespace Nostreets.Orm.EF
 
         #region IQueryable path — filters IN THE DATABASE
 
+        // ⚠️ INTERNAL, not public. These are reached ONLY through EFDBService's Where / FirstOrDefault /
+        // Count, which own the try-SQL-then-fall-back-to-memory decision. Exposing them would let a
+        // caller take the translating path WITHOUT that fallback, so an untranslatable predicate would
+        // throw in production instead of degrading - and the caller would have no way to know which of
+        // the two behaviours it had asked for.
+        //
+        // (They cannot be `private`: EFDBContext is a separate class from EFDBService, which is what
+        // calls them. `internal` is the narrowest visibility that still compiles, and it keeps them off
+        // the package's public surface entirely.)
+
         // 🔑 The ONLY difference from the Func overloads above is the parameter type, and it is the whole
         // difference. `Queryable.Where` requires Expression<Func<T,bool>>; given a plain Func, C# binds to
         // `Enumerable.Where` instead, which enumerates the DbSet — so EF issues SELECT * and filters in
@@ -834,10 +844,10 @@ namespace Nostreets.Orm.EF
         // trade — a loud failure beats a hidden table scan — but it is why these are separate methods
         // rather than a change to the existing ones: nothing that works today changes behaviour.
 
-        public async Task<IEnumerable<TContext>> WhereTranslatedAsync(Expression<Func<TContext, bool>> predicate)
+        internal async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate)
             => await Set<TContext>().Where(predicate).ToListAsync();
 
-        public async Task<IEnumerable<TContext>> WhereTranslatedAsync(Expression<Func<TContext, bool>> predicate,
+        internal async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate,
                                                                      int pageSize,
                                                                      int pageOffset,
                                                                      string orderByKey = null,
@@ -852,12 +862,12 @@ namespace Nostreets.Orm.EF
             return await query.Skip(pageOffset).Take(pageSize).ToListAsync();
         }
 
-        public async Task<int> CountTranslatedAsync(Expression<Func<TContext, bool>> predicate)
+        internal async Task<int> CountQueryableAsync(Expression<Func<TContext, bool>> predicate)
             => predicate == null
                 ? await Set<TContext>().CountAsync()
                 : await Set<TContext>().CountAsync(predicate);
 
-        public async Task<TContext> FirstOrDefaultTranslatedAsync(Expression<Func<TContext, bool>> predicate)
+        internal async Task<TContext> FirstOrDefaultQueryableAsync(Expression<Func<TContext, bool>> predicate)
             => await Set<TContext>().FirstOrDefaultAsync(predicate);
 
         /// <summary>

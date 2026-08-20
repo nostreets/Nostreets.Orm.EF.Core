@@ -197,14 +197,21 @@ namespace Nostreets.Orm.EF
             await QueryResults<int>(query);
         }
 
-        public async Task<int> Count(Func<T, bool> predicate = null)
+        /// <summary><c>COUNT(*)</c> in SQL when the expression translates.</summary>
+        public async Task<int> Count(Expression<Func<T, bool>> predicate = null)
         {
-            int result = 0;
             using (var context = await EFDBContext<T>.Build(ContextOptions))
             {
-                result = context.Count(predicate);
+                try
+                {
+                    return await context.CountTranslatedAsync(predicate);
+                }
+                catch (InvalidOperationException ex) when (IsUntranslatable(ex))
+                {
+                    OrmDiagnostics.ReportUntranslatable(typeof(T), predicate, ex);
+                    return context.Count(predicate.Compile());
+                }
             }
-            return result;
         }
 
         public async Task<List<T>> GetAll()
@@ -410,84 +417,112 @@ namespace Nostreets.Orm.EF
             await Update(converter(model));
         }
 
-        public async Task<List<T>> Where(Func<T, bool> predicate)
+        /// <summary>
+        /// 🔑 SQL FIRST, in-memory only as a fallback.
+        /// <para>
+        /// The predicate is an <c>Expression</c>, so the tree survives to EF and becomes a real WHERE.
+        /// If EF reports it cannot translate the expression, it is compiled and applied in memory —
+        /// the pre-2026-08-20 behaviour — so nothing that worked before stops working.
+        /// </para>
+        /// </summary>
+        public async Task<List<T>> Where(Expression<Func<T, bool>> predicate)
         {
             if (predicate == null) throw new ArgumentNullException(nameof(predicate));
 
-            IEnumerable<T> result = null;
             using (var context = await EFDBContext<T>.Build(ContextOptions))
-                result = await context.WhereAsync(predicate);
-
-            return result.ToList();
+            {
+                try
+                {
+                    return (await context.WhereTranslatedAsync(predicate)).ToList();
+                }
+                catch (InvalidOperationException ex) when (IsUntranslatable(ex))
+                {
+                    OrmDiagnostics.ReportUntranslatable(typeof(T), predicate, ex);
+                    return (await context.WhereAsync(predicate.Compile())).ToList();
+                }
+            }
         }
 
-        public async Task<List<T>> Where(Func<T, bool> predicate, 
-                                         int pageSize, 
-                                         int pageOffset, 
+        /// <summary>
+        /// Whether an exception is EF saying "I cannot turn this into SQL" rather than a real failure.
+        /// <para>
+        /// 🔴 This is a MESSAGE match, and that is not a preference — EF Core raises a plain
+        /// <c>InvalidOperationException</c> for an untranslatable expression with no distinguishing
+        /// type, error code or property. The substring it keys on is the stable half of EF's message
+        /// ("could not be translated"), which has survived EF 3 → 9.
+        /// </para>
+        /// <para>
+        /// ⚠️ Deliberately NARROW. Catching more broadly would convert genuine database faults —
+        /// a missing table, a bad connection, a timeout — into a silent full table scan that returns
+        /// plausible-looking rows. A wrong answer nobody can see is worse than an exception.
+        /// </para>
+        /// </summary>
+        internal static bool IsUntranslatable(InvalidOperationException ex)
+            => ex?.Message?.Contains("could not be translated", StringComparison.OrdinalIgnoreCase) == true;
+
+        /// <summary>
+        /// Paged read. Filters, orders and pages IN THE DATABASE when the expression translates.
+        /// <para>
+        /// ⚠️ A non-null <paramref name="comparer"/> forces the in-memory path: a .NET
+        /// <c>IComparer</c> has no SQL equivalent, so it cannot be translated at all — there is no
+        /// point attempting a query that is guaranteed to fail.
+        /// </para>
+        /// </summary>
+        public async Task<List<T>> Where(Expression<Func<T, bool>> predicate,
+                                         int pageSize,
+                                         int pageOffset,
                                          string orderByKey = null,
                                          bool desc = false,
                                          IComparer<object> comparer = null)
         {
             if (predicate == null) throw new ArgumentNullException(nameof(predicate));
 
-            IEnumerable<T> result = null;
             using (var context = await EFDBContext<T>.Build(ContextOptions))
-                result = await context.WhereAsync(predicate, pageSize, pageOffset, orderByKey, desc, comparer);
+            {
+                if (comparer == null)
+                {
+                    try
+                    {
+                        return (await context.WhereTranslatedAsync(predicate, pageSize, pageOffset, orderByKey, desc)).ToList();
+                    }
+                    catch (InvalidOperationException ex) when (IsUntranslatable(ex))
+                    {
+                        OrmDiagnostics.ReportUntranslatable(typeof(T), predicate, ex);
+                        // fall through to the in-memory path below
+                    }
+                }
 
-            return result.ToList();
+                return (await context.WhereAsync(predicate.Compile(), pageSize, pageOffset, orderByKey, desc, comparer)).ToList();
+            }
         }
 
-        public async Task<T> FirstOrDefault(Func<T, bool> predicate)
+        /// <summary>
+        /// First match. Emits <c>TOP(1)</c> when the expression translates.
+        /// <para>
+        /// 🔴 The fallback deliberately reuses <see cref="Where(Expression{Func{T, bool}})"/>, which
+        /// materialises the whole filtered set to take one row — that is what this method ALWAYS did
+        /// before. It is now only the untranslatable case rather than every call.
+        /// </para>
+        /// </summary>
+        public async Task<T> FirstOrDefault(Expression<Func<T, bool>> predicate)
         {
             if (predicate == null) throw new ArgumentNullException(nameof(predicate));
 
-            return (await Where(predicate)).FirstOrDefault();
-        }
-
-        #region IQueryable path — the filter runs in SQL, not in memory
-
-        /// <inheritdoc />
-        public async Task<List<T>> WhereQueryable(Expression<Func<T, bool>> predicate)
-        {
-            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
-
             using (var context = await EFDBContext<T>.Build(ContextOptions))
-                return (await context.WhereQueryableAsync(predicate)).ToList();
+            {
+                try
+                {
+                    return await context.FirstOrDefaultTranslatedAsync(predicate);
+                }
+                catch (InvalidOperationException ex) when (IsUntranslatable(ex))
+                {
+                    OrmDiagnostics.ReportUntranslatable(typeof(T), predicate, ex);
+                    return (await context.WhereAsync(predicate.Compile())).FirstOrDefault();
+                }
+            }
         }
 
-        /// <inheritdoc />
-        public async Task<List<T>> WhereQueryable(Expression<Func<T, bool>> predicate,
-                                                  int pageSize,
-                                                  int pageOffset,
-                                                  string orderByKey = null,
-                                                  bool desc = false)
-        {
-            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
 
-            using (var context = await EFDBContext<T>.Build(ContextOptions))
-                return (await context.WhereQueryableAsync(predicate, pageSize, pageOffset, orderByKey, desc)).ToList();
-        }
-
-        /// <inheritdoc />
-        public async Task<int> CountQueryable(Expression<Func<T, bool>> predicate = null)
-        {
-            using (var context = await EFDBContext<T>.Build(ContextOptions))
-                return await context.CountQueryableAsync(predicate);
-        }
-
-        /// <inheritdoc />
-        public async Task<T> FirstOrDefaultQueryable(Expression<Func<T, bool>> predicate)
-        {
-            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
-
-            // NOT (await WhereQueryable(predicate)).FirstOrDefault() — that is the mistake the Func version
-            // makes (EFDBService.FirstOrDefault materialises the entire filtered set to take one row).
-            // FirstOrDefaultAsync emits TOP(1).
-            using (var context = await EFDBContext<T>.Build(ContextOptions))
-                return await context.FirstOrDefaultQueryableAsync(predicate);
-        }
-
-        #endregion
 
         public async Task OnEntityChanges(Action<T> onChange, Predicate<T> predicate = null)
         {
@@ -799,10 +834,10 @@ namespace Nostreets.Orm.EF
         // trade — a loud failure beats a hidden table scan — but it is why these are separate methods
         // rather than a change to the existing ones: nothing that works today changes behaviour.
 
-        public async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate)
+        public async Task<IEnumerable<TContext>> WhereTranslatedAsync(Expression<Func<TContext, bool>> predicate)
             => await Set<TContext>().Where(predicate).ToListAsync();
 
-        public async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate,
+        public async Task<IEnumerable<TContext>> WhereTranslatedAsync(Expression<Func<TContext, bool>> predicate,
                                                                      int pageSize,
                                                                      int pageOffset,
                                                                      string orderByKey = null,
@@ -817,12 +852,12 @@ namespace Nostreets.Orm.EF
             return await query.Skip(pageOffset).Take(pageSize).ToListAsync();
         }
 
-        public async Task<int> CountQueryableAsync(Expression<Func<TContext, bool>> predicate)
+        public async Task<int> CountTranslatedAsync(Expression<Func<TContext, bool>> predicate)
             => predicate == null
                 ? await Set<TContext>().CountAsync()
                 : await Set<TContext>().CountAsync(predicate);
 
-        public async Task<TContext> FirstOrDefaultQueryableAsync(Expression<Func<TContext, bool>> predicate)
+        public async Task<TContext> FirstOrDefaultTranslatedAsync(Expression<Func<TContext, bool>> predicate)
             => await Set<TContext>().FirstOrDefaultAsync(predicate);
 
         /// <summary>

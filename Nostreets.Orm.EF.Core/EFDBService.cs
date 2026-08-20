@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Configuration;
 using System.Data;
 using System.Reflection;
@@ -443,6 +444,51 @@ namespace Nostreets.Orm.EF
             return (await Where(predicate)).FirstOrDefault();
         }
 
+        #region IQueryable path — the filter runs in SQL, not in memory
+
+        /// <inheritdoc />
+        public async Task<List<T>> WhereQueryable(Expression<Func<T, bool>> predicate)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+                return (await context.WhereQueryableAsync(predicate)).ToList();
+        }
+
+        /// <inheritdoc />
+        public async Task<List<T>> WhereQueryable(Expression<Func<T, bool>> predicate,
+                                                  int pageSize,
+                                                  int pageOffset,
+                                                  string orderByKey = null,
+                                                  bool desc = false)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+                return (await context.WhereQueryableAsync(predicate, pageSize, pageOffset, orderByKey, desc)).ToList();
+        }
+
+        /// <inheritdoc />
+        public async Task<int> CountQueryable(Expression<Func<T, bool>> predicate = null)
+        {
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+                return await context.CountQueryableAsync(predicate);
+        }
+
+        /// <inheritdoc />
+        public async Task<T> FirstOrDefaultQueryable(Expression<Func<T, bool>> predicate)
+        {
+            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+
+            // NOT (await WhereQueryable(predicate)).FirstOrDefault() — that is the mistake the Func version
+            // makes (EFDBService.FirstOrDefault materialises the entire filtered set to take one row).
+            // FirstOrDefaultAsync emits TOP(1).
+            using (var context = await EFDBContext<T>.Build(ContextOptions))
+                return await context.FirstOrDefaultQueryableAsync(predicate);
+        }
+
+        #endregion
+
         public async Task OnEntityChanges(Action<T> onChange, Predicate<T> predicate = null)
         {
             if (onChange == null) throw new ArgumentNullException(nameof(onChange));
@@ -739,6 +785,67 @@ namespace Nostreets.Orm.EF
         {
             return await Task.Run(() => Set<TContext>().Where(predicate).ToList());
         }
+
+        #region IQueryable path — filters IN THE DATABASE
+
+        // 🔑 The ONLY difference from the Func overloads above is the parameter type, and it is the whole
+        // difference. `Queryable.Where` requires Expression<Func<T,bool>>; given a plain Func, C# binds to
+        // `Enumerable.Where` instead, which enumerates the DbSet — so EF issues SELECT * and filters in
+        // memory no matter how simple the predicate is. Keeping the tree intact all the way to EF is what
+        // lets the WHERE reach SQL.
+        //
+        // ⚠️ These can THROW where the Func versions silently succeeded. An expression EF cannot translate
+        // raises InvalidOperationException instead of quietly running in memory. That is the intended
+        // trade — a loud failure beats a hidden table scan — but it is why these are separate methods
+        // rather than a change to the existing ones: nothing that works today changes behaviour.
+
+        public async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate)
+            => await Set<TContext>().Where(predicate).ToListAsync();
+
+        public async Task<IEnumerable<TContext>> WhereQueryableAsync(Expression<Func<TContext, bool>> predicate,
+                                                                     int pageSize,
+                                                                     int pageOffset,
+                                                                     string orderByKey = null,
+                                                                     bool desc = false)
+        {
+            IQueryable<TContext> query = Set<TContext>().Where(predicate);
+
+            query = ApplyOrdering(query, orderByKey, desc);
+
+            // Skip/Take must run AFTER the order by, and pageOffset is a RAW ROW OFFSET — the same
+            // contract the Func overload uses (callers compute PageIndex * PageSize themselves).
+            return await query.Skip(pageOffset).Take(pageSize).ToListAsync();
+        }
+
+        public async Task<int> CountQueryableAsync(Expression<Func<TContext, bool>> predicate)
+            => predicate == null
+                ? await Set<TContext>().CountAsync()
+                : await Set<TContext>().CountAsync(predicate);
+
+        public async Task<TContext> FirstOrDefaultQueryableAsync(Expression<Func<TContext, bool>> predicate)
+            => await Set<TContext>().FirstOrDefaultAsync(predicate);
+
+        /// <summary>
+        /// Orders by a property NAME, translated to SQL.
+        /// <para>
+        /// Uses <c>EF.Property</c> rather than reflection: <c>orderProp.GetValue(a)</c> is a .NET call EF
+        /// cannot translate, so it would silently force the whole query client-side and undo the point of
+        /// this path. An unknown or blank key is left unordered rather than throwing — SQL Server does not
+        /// guarantee row order without an ORDER BY, so a paged read with no key is the caller's bug to
+        /// notice, not a reason to fail the request.
+        /// </para>
+        /// </summary>
+        private static IQueryable<TContext> ApplyOrdering(IQueryable<TContext> query, string orderByKey, bool desc)
+        {
+            if (string.IsNullOrWhiteSpace(orderByKey) || !typeof(TContext).HasProperty(orderByKey))
+                return query;
+
+            return desc
+                ? query.OrderByDescending(a => Microsoft.EntityFrameworkCore.EF.Property<object>(a, orderByKey))
+                : query.OrderBy(a => Microsoft.EntityFrameworkCore.EF.Property<object>(a, orderByKey));
+        }
+
+        #endregion
 
         public async Task<IEnumerable<TContext>> WhereAsync(Func<TContext, bool> predicate,
                                                             int pageSize,

@@ -44,9 +44,31 @@ elsewhere may still say "the entire implementation is one file" — they are sta
 **`WhereRaw(sql, params)`** (raw parameterized SQL returning full entities) ·
 `QueryResults<TResult>(sql, params)` (raw parameterized SQL, scalar/unmapped projections).
 
-**Predicates are `Func<T,bool>` (client-side), not `Expression<…>`** — queries materialize then
-filter in memory. Designed for modest result sets. **To push a filter into the DATABASE use
-`WhereRaw`** ([D-215], added 2026-08-06) — *not* `QueryResults`, which the old guidance here named:
+### 🔑 Three filtering paths, and picking the wrong one is the recurring perf bug
+
+| Method | Predicate type | Where the filter runs |
+|---|---|---|
+| `Where` / `FirstOrDefault` / `Count` | `Func<T,bool>` | **IN MEMORY.** Materializes the whole table first. |
+| **`WhereQueryable` / `FirstOrDefaultQueryable` / `CountQueryable`** | `Expression<Func<T,bool>>` | **IN SQL.** Translated by EF. |
+| `WhereRaw` | you write the SQL | IN SQL. |
+
+**Why the `Func` versions cannot translate, and it is not a missing feature:** `Queryable.Where`
+requires an `Expression<Func<T,bool>>`. Given a plain `Func`, C# binds to **`Enumerable.Where`**
+instead, which enumerates the `DbSet` — so EF issues `SELECT *` and filters client-side **however
+simple the predicate is**. The expression tree is already gone by the time the ORM sees it.
+
+**`WhereQueryable` (added 2026-08-20) is the one to reach for by default.** Ordinary predicates —
+comparisons, `&&`/`||`, `Contains` over a local collection (becomes `IN`), null checks — translate
+fine, and you keep writing normal C# lambdas. 🔴 It **throws** on anything EF cannot translate, where
+the `Func` version silently scanned; that is deliberate (a loud failure beats a hidden full scan) and
+is exactly the case `WhereRaw` exists for ([D-215]).
+
+⚠️ They are **separate methods, not overloads**, because C# prefers a delegate over an expression
+tree for a lambda literal — an added overload would never be selected by existing call sites, and
+silently rebinding ~197 of them would turn every untranslatable predicate into a runtime throw.
+
+**To push a filter into the DATABASE** use `WhereQueryable`, or `WhereRaw`
+([D-215], added 2026-08-06) when it cannot be expressed — *not* `QueryResults`, which the old guidance here named:
 `SqlQueryRaw<T>` for unmapped types is an EF 8+ feature, so on the previous EF 7 pin `QueryResults`
 was effectively scalar-only. Two `WhereRaw` constraints, both of which fail at runtime rather than
 compile time: the SQL must project **every** mapped column (`SELECT *`), and values must travel in
@@ -188,8 +210,16 @@ test DLLs and the run exits 0 having executed ZERO tests).
 
 ## What to Avoid
 
-- Do not pass `Expression<Func<T,bool>>` expecting server-side translation — the API takes
-  `Func<T,bool>` and filters in memory.
+- Do not expect `Where(Func<T,bool>)` to filter in the database — it never has and still does not.
+  **Reach for `WhereQueryable(Expression<Func<T,bool>>)` instead** for ordinary predicates; it is the
+  default worth using, and `Where` is the fallback.
+- Do not assume `WhereQueryable` can express everything `Where` can. It THROWS on anything EF cannot
+  translate (a JSON deserialize, a custom helper, a C# call over a column) where `Where` silently
+  scanned. That is the intended trade — a loud failure beats a hidden table scan — but a predicate
+  that genuinely cannot be SQL still needs `WhereRaw`.
+- Do not add an `Expression` OVERLOAD of `Where` and expect call sites to pick it up. C# overload
+  resolution prefers a delegate over an expression tree for a lambda literal, so the overload would
+  never be selected — which is why these are separately named methods.
 - Do not reach for `MigrateIfNotCurrent` — it is `[Obsolete]` and inert. It can no longer lose column
   data (it degrades to `MigrationMode = Report`), so the old "not against a database you can't afford
   to lose" warning no longer applies; it simply is not the knob. Use `EFDBContextOptions.MigrationMode`.

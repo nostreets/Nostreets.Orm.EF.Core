@@ -7,27 +7,27 @@ using Nostreets.Orm.EF;
 namespace Nostreets.Orm.EF.Core.Test
 {
     /// <summary>
-    /// P1 perf — proves that <c>Where</c>/<c>Count</c>/<c>FirstOrDefault</c> now run IN THE DATABASE,
+    /// P1 perf — proves that <c>Where</c>/<c>Count</c>/<c>FirstOrDefault</c> now run IN the DATABASE,
     /// and that an untranslatable predicate degrades instead of throwing.
     ///
     /// <para>
-    /// 🔑 <b>How translation is proven without reading the SQL.</b> Case sensitivity is the tell.
+    /// How translation is proven without reading the SQL. Case sensitivity is the tell.
     /// .NET string comparison is ORDINAL, so in memory <c>a.Name == "ALICE"</c> can never match a row
     /// stored as <c>"alice"</c>. SQL Server compares under the column collation —
-    /// <c>SQL_Latin1_General_CP1_CI_AS</c> across this estate — where it DOES match. So a
+    /// <c>SQL_Latin1_General_CP1_CI_AS</c> across this estate — where it does match. So a
     /// case-different match is only possible if the predicate actually reached SQL. No in-memory double
     /// can fake that result, and no amount of unit testing can produce it.
     /// </para>
     ///
     /// <para>
-    /// 🔴 Hits a REAL SQL Server (local SQLEXPRESS, scratch database <c>NostreetsOrmTest</c>) and is
-    /// deliberately NOT skippable when the server is unreachable — a test that quietly passes without a
+    /// Hits a real SQL Server (local SQLEXPRESS, scratch database <c>NostreetsOrmTest</c>) and is
+    /// deliberately not skippable when the server is unreachable — a test that quietly passes without a
     /// database is exactly the vacuous green [D-193] exists to prevent.
     /// </para>
     ///
     /// <para>
-    /// ⚠️ Run with <c>-c Release</c> and read the <c>Passed!</c> line, never the exit code: Smart App
-    /// Control blocks a freshly-built test DLL and the run exits 0 having executed ZERO tests.
+    /// Run with <c>-c Release</c> and read the <c>Passed!</c> line, never the exit code: Smart App
+    /// Control blocks a freshly-built test DLL and the run exits 0 having executed zero tests.
     /// </para>
     /// </summary>
     [Collection("sql")]
@@ -59,8 +59,8 @@ namespace Nostreets.Orm.EF.Core.Test
         // ───────────────────────── translation actually happens ─────────────────────────
 
         /// <summary>
-        /// 🔑 THE decisive test. A row stored lowercase, matched with an uppercase literal. This can
-        /// ONLY pass if the comparison ran in SQL under the CI collation — in memory it is ordinal and
+        /// the decisive test. A row stored lowercase, matched with an uppercase literal. This can
+        /// only pass if the comparison ran in SQL under the CI collation — in memory it is ordinal and
         /// returns nothing. If this ever goes red, predicates have silently stopped translating and
         /// every read in the estate is scanning again.
         /// </summary>
@@ -125,7 +125,7 @@ namespace Nostreets.Orm.EF.Core.Test
         // ───────────────────────── the fallback, and its receipt ─────────────────────────
 
         /// <summary>
-        /// An untranslatable predicate must still return the RIGHT ROWS — the fallback is a correctness
+        /// An untranslatable predicate must still return the RIGHT rows — the fallback is a correctness
         /// net. It must also leave a trace, because the cost it hides (a full table scan) is otherwise
         /// invisible from the caller's side.
         /// </summary>
@@ -171,7 +171,7 @@ namespace Nostreets.Orm.EF.Core.Test
         // ───────────────────────── BUG-107, against a real foreign key ─────────────────────────
 
         /// <summary>
-        /// 🔴 BUG-107 end-to-end. The unit test asserts the cascade ORDER against in-memory doubles;
+        /// BUG-107 end-to-end. The unit test asserts the cascade order against in-memory doubles;
         /// only a real database has the <c>NO_ACTION</c> foreign key that made the inverted order
         /// throw SQL 547. Fakes have no referential integrity and cannot fail the way SQL fails —
         /// which is exactly how the defect survived every existing test.

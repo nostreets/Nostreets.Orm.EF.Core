@@ -19,9 +19,9 @@ namespace Nostreets.Orm.EF
     /// operator reviews. The artifacts are identical in Report and AutoApplyAdditive: the mode gates
     /// execution, never evidence.
     ///
-    /// The scripts run as ONE batch with THROW on any guard violation, so a violated precondition
+    /// The scripts run as one batch with THROW on any guard violation, so a violated precondition
     /// aborts everything after it — matching the stop-gap rule that the pipeline refuses rather than
-    /// proceeds. RAISERROR was rejected here because severity 16 does NOT stop the batch.
+    /// proceeds. RAISERROR was rejected here because severity 16 does not stop the batch.
     /// </remarks>
     public static class MigrationArtifactWriter
     {
@@ -112,7 +112,7 @@ namespace Nostreets.Orm.EF
                         break;
 
                     case ColumnDriftKind.AddBlocked:
-                        // Commented, not gated: this statement CANNOT succeed on a populated table,
+                        // Commented, not gated: this statement cannot succeed on a populated table,
                         // so an executable form would only manufacture a failure.
                         sb.AppendLine($"-- WITHHELD: {Comment(GenerateAdd(ddl, table, d.ColumnName, d.ModelShape, d.DefaultSql))}");
                         break;
@@ -443,7 +443,7 @@ ALTER TABLE [dbo].[{table}] DROP COLUMN [{oldName}];";
     }
 
     /// <summary>
-    /// Writes a run's artifacts. Console FIRST, always — a Container App's filesystem is ephemeral,
+    /// Writes a run's artifacts. Console first, always — a Container App's filesystem is ephemeral,
     /// so the summary must land in ContainerAppConsoleLogs_CL even when the file sink cannot write.
     /// </summary>
     public static class SchemaMigrationSink

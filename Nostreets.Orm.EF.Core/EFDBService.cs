@@ -102,12 +102,12 @@ namespace Nostreets.Orm.EF
         /// It is a member of its own for two reasons. First, the bug it replaces was invisible at the
         /// call site. All four overloads read
         /// <code>a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id</code>
-        /// where **both operands are statically `object`**, so `==` bound to **reference** equality
+        /// where both operands are statically `object`, so `==` bound to reference equality
         /// instead of `string`/`int`/`Guid` value equality. `GetValue` boxes a value-type key into a
         /// fresh box on every call, and EF materialises a fresh `string` instance per row, so the
         /// reference was never the caller's — **the predicate matched no row, ever, for every entity
         /// type in the estate.** `FirstOrDefaultAsync` then returned null and `dbSet.Remove(null)`
-        /// threw `ArgumentNullException`, which is why an id-keyed HARD delete has never worked.
+        /// threw `ArgumentNullException`, which is why an id-keyed hard delete has never worked.
         /// (The default soft path was unaffected: it archives via `Update`, never through here.)
         /// Second, this is the only part of `Delete` that is testable without a database.
         ///
@@ -197,7 +197,7 @@ namespace Nostreets.Orm.EF
             await QueryResults<int>(query);
         }
 
-        /// <summary><c>COUNT(*)</c> in SQL when the expression translates.</summary>
+        /// <summary><c>count(*)</c> in SQL when the expression translates.</summary>
         public async Task<int> Count(Expression<Func<T, bool>> predicate = null)
         {
             using (var context = await EFDBContext<T>.Build(ContextOptions))
@@ -418,7 +418,7 @@ namespace Nostreets.Orm.EF
         }
 
         /// <summary>
-        /// 🔑 SQL FIRST, in-memory only as a fallback.
+        /// SQL first, in-memory only as a fallback.
         /// <para>
         /// The predicate is an <c>Expression</c>, so the tree survives to EF and becomes a real WHERE.
         /// If EF reports it cannot translate the expression, it is compiled and applied in memory —
@@ -446,13 +446,13 @@ namespace Nostreets.Orm.EF
         /// <summary>
         /// Whether an exception is EF saying "I cannot turn this into SQL" rather than a real failure.
         /// <para>
-        /// 🔴 This is a MESSAGE match, and that is not a preference — EF Core raises a plain
+        /// This is a MESSAGE match, and that is not a preference — EF Core raises a plain
         /// <c>InvalidOperationException</c> for an untranslatable expression with no distinguishing
         /// type, error code or property. The substring it keys on is the stable half of EF's message
         /// ("could not be translated"), which has survived EF 3 → 9.
         /// </para>
         /// <para>
-        /// ⚠️ Deliberately NARROW. Catching more broadly would convert genuine database faults —
+        /// Deliberately NARROW. Catching more broadly would convert genuine database faults —
         /// a missing table, a bad connection, a timeout — into a silent full table scan that returns
         /// plausible-looking rows. A wrong answer nobody can see is worse than an exception.
         /// </para>
@@ -461,9 +461,9 @@ namespace Nostreets.Orm.EF
             => ex?.Message?.Contains("could not be translated", StringComparison.OrdinalIgnoreCase) == true;
 
         /// <summary>
-        /// Paged read. Filters, orders and pages IN THE DATABASE when the expression translates.
+        /// Paged read. Filters, orders and pages IN the DATABASE when the expression translates.
         /// <para>
-        /// ⚠️ A non-null <paramref name="comparer"/> forces the in-memory path: a .NET
+        /// A non-null <paramref name="comparer"/> forces the in-memory path: a .NET
         /// <c>IComparer</c> has no SQL equivalent, so it cannot be translated at all — there is no
         /// point attempting a query that is guaranteed to fail.
         /// </para>
@@ -499,7 +499,7 @@ namespace Nostreets.Orm.EF
         /// <summary>
         /// First match. Emits <c>TOP(1)</c> when the expression translates.
         /// <para>
-        /// 🔴 The fallback deliberately reuses <see cref="Where(Expression{Func{T, bool}})"/>, which
+        /// The fallback deliberately reuses <see cref="Where(Expression{Func{T, bool}})"/>, which
         /// materialises the whole filtered set to take one row — that is what this method ALWAYS did
         /// before. It is now only the untranslatable case rather than every call.
         /// </para>
@@ -572,21 +572,21 @@ namespace Nostreets.Orm.EF
         /// Runs raw parameterized SQL and materializes the rows as <typeparamref name="T"/> entities.
         /// </summary>
         /// <remarks>
-        /// 🔑 WHY THIS EXISTS. <see cref="Where(Func{T, bool})"/> takes a <c>Func</c>, not an
+        /// WHY this EXISTS. <see cref="Where(Func{T, bool})"/> takes a <c>Func</c>, not an
         /// <c>Expression</c>, so it binds <c>Enumerable.Where</c>: EF emits a bare
-        /// <c>SELECT * FROM [table]</c>, materializes EVERY row, and filters in memory. For a
+        /// <c>SELECT * FROM [table]</c>, materializes every row, and filters in memory. For a
         /// predicate that cannot be expressed as a translatable expression at all — a JSON array
         /// membership test, say — this pushes the filter into the DATABASE instead.
         ///
-        /// 🔴 THE SQL MUST PROJECT EVERY MAPPED COLUMN OF <typeparamref name="T"/>. <c>FromSqlRaw</c>
+        /// the SQL must PROJECT every MAPPED COLUMN OF <typeparamref name="T"/>. <c>FromSqlRaw</c>
         /// materializes a real entity, so a partial <c>SELECT</c> throws at execution time, not at
         /// compile time. <c>SELECT *</c> is the safe habit here.
         ///
-        /// 🔴 PASS VALUES VIA <paramref name="parameters"/>, NEVER BY INTERPOLATING THEM INTO
+        /// PASS VALUES VIA <paramref name="parameters"/>, NEVER BY INTERPOLATING THEM INTO
         /// <paramref name="sql"/>. This method cannot tell the difference, and the second form is an
         /// injection hole. Reference them by name in the SQL (e.g. <c>WHERE [Id] = @id</c>).
         ///
-        /// ⚠️ Server-side filtering is not automatically an INDEX SEEK. Pushing a predicate into SQL
+        /// Server-side filtering is not automatically an INDEX SEEK. Pushing a predicate into SQL
         /// wins back the network transfer, the allocations and the GC — but if the column cannot be
         /// indexed (an <c>nvarchar(max)</c> JSON blob, for instance) the database still scans.
         /// </remarks>
@@ -595,8 +595,8 @@ namespace Nostreets.Orm.EF
         /// var rooms = await Context&lt;ChatRoom&gt;().WhereRaw(
         ///     @"SELECT * FROM [ChatRoom]
         ///        WHERE [IsArchived] = 0
-        ///          AND [ChatRoomType] = @type
-        ///          AND EXISTS (SELECT 1 FROM OPENJSON([ActiveUserIds]) WHERE [value] = @userId)",
+        ///          and [ChatRoomType] = @type
+        ///          and EXISTS (SELECT 1 FROM OPENJSON([ActiveUserIds]) WHERE [value] = @userId)",
         ///     new Dictionary&lt;string, object&gt; { ["type"] = (int)EntityType.User, ["userId"] = userId });
         /// </code>
         /// </example>
@@ -823,7 +823,7 @@ namespace Nostreets.Orm.EF
 
         #region IQueryable path — filters IN THE DATABASE
 
-        // ⚠️ INTERNAL, not public. These are reached ONLY through EFDBService's Where / FirstOrDefault /
+        // INTERNAL, not public. These are reached only through EFDBService's Where / FirstOrDefault /
         // Count, which own the try-SQL-then-fall-back-to-memory decision. Exposing them would let a
         // caller take the translating path WITHOUT that fallback, so an untranslatable predicate would
         // throw in production instead of degrading - and the caller would have no way to know which of
@@ -833,13 +833,13 @@ namespace Nostreets.Orm.EF
         // calls them. `internal` is the narrowest visibility that still compiles, and it keeps them off
         // the package's public surface entirely.)
 
-        // 🔑 The ONLY difference from the Func overloads above is the parameter type, and it is the whole
+        // The only difference from the Func overloads above is the parameter type, and it is the whole
         // difference. `Queryable.Where` requires Expression<Func<T,bool>>; given a plain Func, C# binds to
         // `Enumerable.Where` instead, which enumerates the DbSet — so EF issues SELECT * and filters in
         // memory no matter how simple the predicate is. Keeping the tree intact all the way to EF is what
         // lets the WHERE reach SQL.
         //
-        // ⚠️ These can THROW where the Func versions silently succeeded. An expression EF cannot translate
+        // These can THROW where the Func versions silently succeeded. An expression EF cannot translate
         // raises InvalidOperationException instead of quietly running in memory. That is the intended
         // trade — a loud failure beats a hidden table scan — but it is why these are separate methods
         // rather than a change to the existing ones: nothing that works today changes behaviour.
@@ -857,7 +857,7 @@ namespace Nostreets.Orm.EF
 
             query = ApplyOrdering(query, orderByKey, desc);
 
-            // Skip/Take must run AFTER the order by, and pageOffset is a RAW ROW OFFSET — the same
+            // Skip/Take must run AFTER the order by, and pageOffset is a RAW row OFFSET — the same
             // contract the Func overload uses (callers compute PageIndex * PageSize themselves).
             return await query.Skip(pageOffset).Take(pageSize).ToListAsync();
         }
@@ -1060,7 +1060,7 @@ namespace Nostreets.Orm.EF
         private static int _driftPassState = 0;
 
         /// <summary>
-        /// P1 Job 12 ([D-232]) — the once-per-entity-type drift pass: analyze, write artifacts,
+        /// ([D-232]) — the once-per-entity-type drift pass: analyze, write artifacts,
         /// (AutoApplyAdditive only) execute forward.sql under an applock, then honor FailOnDrift.
         /// </summary>
         /// <remarks>
@@ -1085,7 +1085,7 @@ namespace Nostreets.Orm.EF
                 var modelColumns = ModelColumnReader.Read(entityType);
                 var liveColumns = await ReadLiveColumnsAsync();
 
-                // Captured BEFORE any DDL can run — this is the PITR restore point a recovery uses,
+                // Captured before any DDL can run — this is the PITR restore point a recovery uses,
                 // so it must predate the change, not describe it.
                 var analyzedAtUtc = DateTime.UtcNow.ToString("O");
 
@@ -1279,7 +1279,7 @@ COMMIT;";
             {
                 if (DoesTableExist(enumType.Name))
                 {
-                    // [D-233] taxonomy #13 — the standing landmine: seeding used to fire ONLY when the
+                    // [D-233] taxonomy #13 — the standing landmine: seeding used to fire only when the
                     // table was missing, so a NEW enum member never got its lookup row and every later
                     // insert using it failed its FK. Sync additively: INSERT missing members, touch
                     // nothing else (a renamed member is a display concern, not an FK one).

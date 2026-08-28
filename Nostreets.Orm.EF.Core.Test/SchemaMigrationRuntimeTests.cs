@@ -11,16 +11,16 @@ using Xunit;
 namespace Nostreets.Orm.EF.Core.Test
 {
     /// <summary>
-    /// P1 Job 12 ([D-232]) — the runtime drift pass, round-tripped against REAL SQL Server (local
+    /// ([D-232]) — the runtime drift pass, round-tripped against real SQL Server (local
     /// SQLEXPRESS, scratch database <c>NostreetsOrmTest</c>) with rows in the table, because the
     /// whole point of the design is what happens to a POPULATED table.
     ///
     /// Each test owns its table and its CLR entity types outright: the drift pass runs once per
     /// closed generic type per process, so sharing types across tests would share that guard.
     /// Version evolution is simulated the way the ORM itself allows — two entity classes bound to
-    /// ONE table via <see cref="EFDBContextOptions.TableName"/>.
+    /// one table via <see cref="EFDBContextOptions.TableName"/>.
     ///
-    /// Deliberately NOT skippable when SQL is unreachable ([D-193]): silently passing without a
+    /// Deliberately not skippable when SQL is unreachable ([D-193]): silently passing without a
     /// database is the vacuous green these suites exist to prevent.
     /// </summary>
     public class SchemaMigrationRuntimeTests
@@ -95,7 +95,7 @@ namespace Nostreets.Orm.EF.Core.Test
             var table = $"SchemaAutoProbe_{RunSuffix}";
             try
             {
-                // V1 creates the table and puts a REAL row in it.
+                // V1 creates the table and puts a real row in it.
                 var v1 = new EFDBService<AutoV1, string>(Options(table, SchemaMigrationMode.Off));
                 await v1.Build(Options(table, SchemaMigrationMode.Off));
                 await v1.Insert(new AutoV1 { Id = "row-1", Name = "survives" });
@@ -341,7 +341,7 @@ namespace Nostreets.Orm.EF.Core.Test
         #endregion
 
         #region Enum lookup sync — the standing landmine, healed additively
-        // Values are FIXED ids; the enum type name IS the lookup table name, so the type is unique to
+        // Values are FIXED ids; the enum type name is the lookup table name, so the type is unique to
         // this suite to keep the scratch DB honest across runs.
         private enum SchemaSyncProbeEnum
         {

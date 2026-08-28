@@ -12,9 +12,9 @@ using Xunit;
 namespace Nostreets.Orm.EF.Core.Test
 {
     /// <summary>
-    /// P1 Job 12 ([D-232]) — the type-normalization core and the drift classifier.
+    /// ([D-232]) — the type-normalization core and the drift classifier.
     ///
-    /// Normalization is tested FIRST and hardest because it is the correctness heart: the model
+    /// Normalization is tested first and hardest because it is the correctness heart: the model
     /// speaks store-type strings ("nvarchar(max)") while INFORMATION_SCHEMA speaks DATA_TYPE +
     /// CHARACTER_MAXIMUM_LENGTH = -1, and any pair that fails to land on the same canonical record
     /// becomes a spurious ALTER — the hallucinated-DDL failure mode this design exists to prevent.
@@ -22,7 +22,7 @@ namespace Nostreets.Orm.EF.Core.Test
     public class SqlTypeNormalizationTests
     {
         /// <summary>
-        /// Each row is ONE column described from both sides. The store-type string and the
+        /// Each row is one column described from both sides. The store-type string and the
         /// INFORMATION_SCHEMA row must normalize to the identical shape, or a no-op startup would
         /// report drift on every boot.
         /// </summary>
@@ -57,7 +57,7 @@ namespace Nostreets.Orm.EF.Core.Test
         }
 
         /// <summary>
-        /// The other direction matters just as much: shapes that genuinely differ MUST compare
+        /// The other direction matters just as much: shapes that genuinely differ must compare
         /// unequal, or a real retype sails through unreported.
         /// </summary>
         [Theory]
@@ -152,7 +152,7 @@ namespace Nostreets.Orm.EF.Core.Test
         }
 
         /// <summary>
-        /// 🔴 The conservatism rule that makes hand-added columns safe BY CONSTRUCTION. Schema alone
+        /// The conservatism rule that makes hand-added columns safe BY CONSTRUCTION. Schema alone
         /// cannot distinguish "a property was removed from the DTO" from "a DBA added this column" —
         /// both read as live-not-model — so the classification is Remove and Remove NEVER auto-runs.
         /// </summary>
@@ -211,7 +211,7 @@ namespace Nostreets.Orm.EF.Core.Test
                     Model("NewNullable", "nvarchar(max)"),
                     Model("NewRequired", "int", nullable: false),
                     // NARROWING on purpose: bigint -> int can lose data, so it must stay OUT of
-                    // the auto set. (The widening direction is AlterSafe and IS in the set - covered
+                    // the auto set. (The widening direction is AlterSafe and is in the set - covered
                     // in SchemaTransformTests.)
                     Model("Retyped", "int")
                 },

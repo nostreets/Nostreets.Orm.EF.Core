@@ -11,7 +11,7 @@ using Xunit;
 namespace Nostreets.Orm.EF.Core.Test
 {
     /// <summary>
-    /// P1 Job 12 ([D-232]) — the three per-run artifacts. The scripts ARE the review surface, so
+    /// ([D-232]) — the three per-run artifacts. The scripts are the review surface, so
     /// these tests assert on the emitted TEXT: the guards, the gates, and what must never appear
     /// outside them. EF's real SqlServerMigrationsSqlGenerator writes the core DDL — resolved from
     /// an offline context, because model/service access never opens a connection.
@@ -65,7 +65,7 @@ namespace Nostreets.Orm.EF.Core.Test
         }
 
         /// <summary>
-        /// 🔴 The conservatism contract, asserted on the text: destructive DDL exists ONLY inside the
+        /// The conservatism contract, asserted on the text: destructive DDL exists only inside the
         /// @RunDestructive gate, so running forward.sql as generated performs additive changes and
         /// nothing else.
         /// </summary>

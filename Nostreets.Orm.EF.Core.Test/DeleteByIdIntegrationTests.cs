@@ -13,18 +13,18 @@ namespace Nostreets.Orm.EF.Core.Test
     /// id-keyed hard delete actually removes the row"* — and no in-memory double can show it, because
     /// the defect only manifests once EF materialises its own instances.
     ///
-    /// 🔴 Hits a REAL SQL Server (local SQLEXPRESS, scratch database `NostreetsOrmTest`). It is
-    /// deliberately NOT skippable when the server is unreachable: a test that quietly passes on a
+    /// Hits a real SQL Server (local SQLEXPRESS, scratch database `NostreetsOrmTest`). It is
+    /// deliberately not skippable when the server is unreachable: a test that quietly passes on a
     /// machine without SQL would be exactly the vacuous green [D-193] exists to prevent. Each test
     /// uses freshly-generated ids so runs never collide and no cleanup step can mask a failure.
     ///
-    /// ⚠️ Run with `-c Release`. A Debug test DLL is blocked by Smart App Control and exits 0 having
-    /// run ZERO tests — read the `Passed!` line, never the exit code.
+    /// Run with `-c Release`. A Debug test DLL is blocked by Smart App Control and exits 0 having
+    /// run zero tests — read the `Passed!` line, never the exit code.
     /// </summary>
     [Collection("sql")]
     public class DeleteByIdIntegrationTests
     {
-        // 🔴 `Pooling=false` is deliberate. This suite threw sporadic `SqlException: A transport-level
+        // `Pooling=false` is deliberate. This suite threw sporadic `SqlException: A transport-level
         // error has occurred ... the I/O operation has been aborted because of either a thread exit
         // or an application request` out of SaveChangesAsync — a DIFFERENT test each run, every one
         // green in isolation. The ORM opens and disposes a context PER OPERATION, so a single test
@@ -78,7 +78,7 @@ namespace Nostreets.Orm.EF.Core.Test
         [Fact]
         public async Task Delete_ByIdType_ActuallyRemovesTheRow()
         {
-            // THE acceptance test. Before the fix this threw ArgumentNullException out of
+            // the acceptance test. Before the fix this threw ArgumentNullException out of
             // dbSet.Remove(null) — the predicate matched nothing, so there was never a row to remove.
             var service = await ReadyServiceAsync();
             var row = NewRow("delete-idtype");
@@ -152,7 +152,7 @@ namespace Nostreets.Orm.EF.Core.Test
         [Fact]
         public async Task DeleteIfExists_CalledTwice_IsIdempotent()
         {
-            // THE reason this method exists. Compensation can legitimately run twice — a rollback
+            // the reason this method exists. Compensation can legitimately run twice — a rollback
             // that got halfway and was retried, or a restart finishing one a dead process began.
             // Under Delete's strict contract the second pass throws on rows the first already
             // removed and can never finish, and the natural workaround is a swallowing try/catch,

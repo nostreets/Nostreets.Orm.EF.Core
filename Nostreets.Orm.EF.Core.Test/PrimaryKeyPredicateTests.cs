@@ -11,14 +11,14 @@ namespace Nostreets.Orm.EF.Core.Test
     ///
     /// The original read
     /// <code>a.GetType().GetProperty(PrimaryKeyName).GetValue(a) == (object)id</code>
-    /// Both operands are statically <c>object</c>, so <c>==</c> resolved to <b>reference</b>
+    /// Both operands are statically <c>object</c>, so <c>==</c> resolved to reference
     /// equality at compile time. `GetValue` boxes a value-type key into a fresh box every call, and
     /// EF materialises a fresh `string` instance per row, so the reference was never the caller's —
-    /// the predicate matched <b>no row, ever, for every entity type in the estate</b>. That made an
-    /// id-keyed HARD delete 100% non-functional, which is what blocks Job 6b's compensation (soft
+    /// the predicate matched no row, ever, for every entity type in the estate. That made an
+    /// id-keyed hard delete 100% non-functional, which is what blocks Job 6b's compensation (soft
     /// delete cannot serve as compensation while BUG-67 stands).
     ///
-    /// 🔴 These tests must construct their "database" values so they are value-equal but
+    /// These tests must construct their "database" values so they are value-equal but
     /// REFERENCE-DISTINCT from the id passed in. A test that reuses the same instance on both sides
     /// passes under the BUG — C# interns string literals, so `"abc" == "abc"` is reference-true and
     /// would have proved nothing.

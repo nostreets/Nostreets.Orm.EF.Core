@@ -9,7 +9,7 @@ namespace Nostreets.Orm.EF
     /// <remarks>
     /// One pipeline, gated at the LAST stage: analysis and artifact generation run identically in
     /// Report and AutoApplyAdditive; the mode decides only whether the additive-safe subset executes.
-    /// Destructive operations (DROP/ALTER) are script-only in EVERY mode — the enum can widen what
+    /// Destructive operations (DROP/ALTER) are script-only in every mode — the enum can widen what
     /// runs automatically to the safe subset, never to the destructive one.
     /// Off is the default because DoYu binds this library by ProjectReference: a rebuild must not
     /// start schema analysis unbidden.
@@ -99,7 +99,7 @@ namespace Nostreets.Orm.EF
     }
 
     /// <summary>
-    /// Table→column flattening, declared on the REAL string bridge column (the SerializedList
+    /// Table→column flattening, declared on the real string bridge column (the SerializedList
     /// pattern's backing property), naming the child table whose rows serialize into it.
     /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
@@ -178,7 +178,7 @@ namespace Nostreets.Orm.EF
             var open = storeType.IndexOf('(');
             var typeName = (open < 0 ? storeType : storeType[..open]).Trim().ToLowerInvariant();
 
-            // numeric IS decimal in SQL Server; fold so the two spellings never read as a retype.
+            // numeric is decimal in SQL Server; fold so the two spellings never read as a retype.
             if (typeName == "numeric")
                 typeName = "decimal";
 
@@ -303,7 +303,7 @@ namespace Nostreets.Orm.EF
     /// Pure over its inputs — no database, no EF — so the classification rules are testable in
     /// isolation and the adapters (EF model on one side, INFORMATION_SCHEMA on the other) stay thin.
     ///
-    /// 🔴 Scope is ONE table. The OS-DB is shared across hosts, so "a table exists that this model
+    /// Scope is one table. The OS-DB is shared across hosts, so "a table exists that this model
     /// does not know" is the NORMAL state, not drift — the analyzer never sees other tables at all.
     /// Within the table, a live column absent from the model is indistinguishable from a hand-added
     /// column ([D-232]): both classify as <see cref="ColumnDriftKind.Remove"/>, which is never

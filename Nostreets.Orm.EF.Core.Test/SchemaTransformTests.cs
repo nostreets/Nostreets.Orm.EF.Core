@@ -11,8 +11,8 @@ using Xunit;
 namespace Nostreets.Orm.EF.Core.Test
 {
     /// <summary>
-    /// P1 Job 12 ([D-233] fourth pass) — AlterSafe, declared renames, and the transformation
-    /// composer. The classification boundary IS the safety contract: only provably-lossless changes
+    /// ([D-233] fourth pass) — AlterSafe, declared renames, and the transformation
+    /// composer. The classification boundary is the safety contract: only provably-lossless changes
     /// may join the auto set, and everything that moves data is script-only forever.
     /// </summary>
     public class AlterSafeClassificationTests

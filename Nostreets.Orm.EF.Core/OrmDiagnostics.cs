@@ -8,7 +8,7 @@ namespace Nostreets.Orm.EF
     /// because EF could not translate a predicate, and fail an operation.
     ///
     /// <para>
-    /// 🔑 <b>Why this exists at all.</b> The translation fallback is a CORRECTNESS net, not a
+    /// Why this exists at all. The translation fallback is a CORRECTNESS net, not a
     /// performance one — it keeps a predicate working, and the price is a full table scan that looks
     /// exactly like a fast query from the caller's side. Nothing throws, nothing is slow enough to
     /// notice on a small table, and the cost only shows up later as an unexplained page load. A silent
@@ -16,7 +16,7 @@ namespace Nostreets.Orm.EF
     /// </para>
     ///
     /// <para>
-    /// ⚠️ <b>No DI, deliberately.</b> This library has no service provider and is consumed by hosts
+    /// No DI, deliberately. This library has no service provider and is consumed by hosts
     /// that wire logging very differently, so a static sink writing to stderr by default means every
     /// host gets the signal with zero registration. Container stdout/stderr is collected by Log
     /// Analytics, which is the same reasoning the schema-drift pass uses for always printing its
@@ -24,7 +24,7 @@ namespace Nostreets.Orm.EF
     /// </para>
     ///
     /// <para>
-    /// 🔴 <b>Deduplicated on purpose.</b> An untranslatable predicate falls back on EVERY call, so
+    /// Deduplicated on purpose. An untranslatable predicate falls back on every call, so
     /// logging each one would bury the signal in its own noise — the first report carries the detail,
     /// the rest only increment a counter. Read <see cref="Untranslated"/> for the running totals; the
     /// count is the part that tells you whether a fallback is a curiosity or the thing melting a page.
@@ -71,7 +71,7 @@ namespace Nostreets.Orm.EF
                 _ => new UntranslatedPredicate(entity, text, ex?.Message, 1),
                 (_, existing) => existing.WithAnotherHit());
 
-            // Only the FIRST hit is reported; the counter carries the rest.
+            // Only the first hit is reported; the counter carries the rest.
             if (entry.Count != 1)
                 return;
 

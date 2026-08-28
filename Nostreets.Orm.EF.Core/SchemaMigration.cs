@@ -146,6 +146,7 @@ namespace Nostreets.Orm.EF
     /// <summary>Normalizes both sides of the comparison into <see cref="SqlColumnShape"/>.</summary>
     public static class SqlTypeNormalizer
     {
+        #region Private Methods
         // Families where (n) is length. INFORMATION_SCHEMA reports CHARACTER_MAXIMUM_LENGTH for
         // these and nothing else.
         private static readonly HashSet<string> LengthTypes = new(StringComparer.OrdinalIgnoreCase)
@@ -166,6 +167,9 @@ namespace Nostreets.Orm.EF
             "datetime2", "datetimeoffset", "time"
         };
 
+        #endregion
+
+        #region Helpers
         /// <summary>
         /// Parses an EF relational store type ("nvarchar(450)", "decimal(18, 2)", "datetime2") into
         /// canonical form.
@@ -253,6 +257,7 @@ namespace Nostreets.Orm.EF
             // nullability are the whole shape. An unknown type also lands here, which is SAFE — an
             // unrecognised pair that differs classifies as Alter, and Alter is script-only.
             return new SqlColumnShape(typeName, null, null, null, isNullable);
+        #endregion
         }
     }
 
@@ -469,7 +474,6 @@ namespace Nostreets.Orm.EF
             drifts.Where(a => a.Kind is ColumnDriftKind.AddSafe or ColumnDriftKind.AlterSafe);
     }
 
-
     /// <summary>
     /// Process-wide tallies of what the drift passes saw and did — the aggregate the pipeline
     /// gate's check mode turns into an exit code (0 clean / 2 additive-applied / 3 needs-human),
@@ -477,6 +481,7 @@ namespace Nostreets.Orm.EF
     /// </summary>
     public static class SchemaDriftTally
     {
+        #region Properties
         private static int _tablesAnalyzed;
         private static int _additiveSafeSeen;
         private static int _humanRequired;
@@ -487,6 +492,9 @@ namespace Nostreets.Orm.EF
         public static int HumanRequired => Volatile.Read(ref _humanRequired);
         public static int AdditiveApplied => Volatile.Read(ref _additiveApplied);
 
+        #endregion
+
+        #region Methods
         internal static void RecordAnalysis(IReadOnlyCollection<ColumnDrift> drifts)
         {
             Interlocked.Increment(ref _tablesAnalyzed);
@@ -495,6 +503,7 @@ namespace Nostreets.Orm.EF
         }
 
         internal static void RecordApplied(int columns) => Interlocked.Add(ref _additiveApplied, columns);
+        #endregion
     }
 
     /// <summary>Extracts <see cref="ModelColumn"/>s from the entity's EF model.</summary>

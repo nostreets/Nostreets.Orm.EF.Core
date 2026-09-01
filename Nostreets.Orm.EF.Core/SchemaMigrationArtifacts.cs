@@ -83,6 +83,7 @@ namespace Nostreets.Orm.EF
             ColumnDriftKind.AlterSafe => "auto-apply candidate (lossless widening, mode-gated)",
             ColumnDriftKind.Rename => "script-only, behind @RunDestructive (package skew)",
             ColumnDriftKind.Transform => "script-only, behind @RunDestructive (moves data)",
+            ColumnDriftKind.TableMissing => "CREATE TABLE — runs ungated (nothing to lose); needs a human because the check may not do DDL",
             _ => "never emitted — investigate by hand"
         };
 
@@ -152,6 +153,17 @@ namespace Nostreets.Orm.EF
                         sb.AppendLine("IF @RunDestructive = 1");
                         sb.AppendLine("BEGIN");
                         sb.AppendLine(Indent(d.ScriptOverride ?? "-- (no script composed — see the banner)"));
+                        sb.AppendLine("END");
+                        break;
+
+                    case ColumnDriftKind.TableMissing:
+                        // UNGATED on purpose, unlike every other script-only kind: creating a table that
+                        // does not exist cannot lose data, so there is nothing for @RunDestructive to
+                        // protect. The OBJECT_ID guard makes it re-runnable, which matters because the
+                        // gate re-checks after the pause and a replica may have created it meanwhile.
+                        sb.AppendLine($"IF OBJECT_ID(N'[dbo].[{table}]', N'U') IS NULL");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine(Indent(d.ScriptOverride ?? "-- (no CREATE composed — see the banner)"));
                         sb.AppendLine("END");
                         break;
 
@@ -229,6 +241,19 @@ namespace Nostreets.Orm.EF
 
                     case ColumnDriftKind.Transform:
                         sb.AppendLine("-- Transformations move data; there is no structural inverse. Roll back via the point-in-time restore at the restore point above.");
+                        break;
+
+                    case ColumnDriftKind.TableMissing:
+                        // The inverse of CREATE TABLE is DROP TABLE, which is destructive in the fullest
+                        // sense — so it is @Force-gated AND refuses a table that has since taken rows.
+                        // The forward ran ungated because creating an absent table cannot lose anything;
+                        // that asymmetry is deliberate and is the same one AlterSafe carries.
+                        sb.AppendLine("IF @Force = 1 AND OBJECT_ID(N'[dbo].[" + table + "]', N'U') IS NOT NULL");
+                        sb.AppendLine("BEGIN");
+                        sb.AppendLine($"    IF EXISTS (SELECT 1 FROM [dbo].[{table}])");
+                        sb.AppendLine($"        THROW 50003, N'[dbo].[{table}] has accumulated rows since it was created — export them or drop it by hand.', 1;");
+                        sb.AppendLine($"    DROP TABLE [dbo].[{table}];");
+                        sb.AppendLine("END");
                         break;
 
                     default:

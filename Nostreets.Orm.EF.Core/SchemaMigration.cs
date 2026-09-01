@@ -57,7 +57,28 @@ namespace Nostreets.Orm.EF
         Transform,
 
         /// <summary>Drift on a primary-key column, or otherwise ambiguous. Never emitted; report only.</summary>
-        Blocked
+        Blocked,
+
+        /// <summary>
+        /// The whole TABLE is absent from the database ([D-323] / BUG-150 follow-on). Emitted only when
+        /// <c>EFDBContextOptions.SuppressSchemaCreation</c> is on — i.e. inside the pipeline's
+        /// <c>--schema-drift-check</c>, which must be incapable of DDL.
+        ///
+        /// 🔑 It exists because the check used to CREATE a missing table and then report "no drift" — so a
+        /// brand-new table was invisible to the gate by construction: the gate made it clean and then
+        /// truthfully said it was clean. Reporting it is the strongest signal the gate can emit.
+        ///
+        /// Carries its CREATE TABLE in <see cref="ColumnDrift.ScriptOverride"/>, the same way
+        /// <see cref="Transform"/> carries its composed script, so the artifact writer needs no new
+        /// SQL-generation machinery. Additive by nature — there is no data to lose — so forward.sql runs
+        /// it UNGATED, while the rollback DROP sits behind @RunDestructive like every other destructive op.
+        ///
+        /// Never auto-applies: it is not in <see cref="SchemaDriftAnalyzer.AdditiveSafe"/>, so
+        /// AutoApplyAdditive leaves it for a human and <see cref="SchemaDriftTally"/> counts it as
+        /// human-required (both are whitelists of AddSafe/AlterSafe, so this classifies correctly with
+        /// no change to either).
+        /// </summary>
+        TableMissing
     }
 
     /// <summary>

@@ -1034,6 +1034,26 @@ namespace Nostreets.Orm.EF
             if (CheckComplete)
                 return;
 
+            // BUG-150 follow-on / [D-323] — the check pass must be INCAPABLE of DDL.
+            //
+            // Everything below this branch is schema creation, and running it inside the pipeline gate
+            // is what made a brand-new table invisible: the check created it and then truthfully
+            // reported no drift. Under suppression we create nothing and let RunSchemaDriftPass report
+            // the absence, which is the strongest signal the gate can emit.
+            //
+            // We return WITHOUT throwing even though the table is missing — the throw below is the
+            // "creation failed" path, and here creation was never attempted. Reporting is the outcome.
+            if (options.SuppressSchemaCreation)
+            {
+                // Enum ROW sync is DML on tables that already exist, not DDL, and it is the [D-233]
+                // taxonomy-#13 fix: an emptied lookup table breaks every later insert on its FK. The
+                // create-if-missing half inside GenerateEnumTables is skipped by the same flag.
+                if (options.CreateEnumTables)
+                    await GenerateEnumTables(options);
+
+                return;
+            }
+
             if (!DoesTableExist())
             {
                 RelationalDatabaseCreator databaseCreator = (Database.GetService<IDatabaseCreator>() as RelationalDatabaseCreator)!;
@@ -1041,7 +1061,7 @@ namespace Nostreets.Orm.EF
             }
 
             if (options.CreateEnumTables)
-                await GenerateEnumTables();
+                await GenerateEnumTables(options);
 
             if (options.CreateFKs)
                 await GenerateForeignKeys();
@@ -1089,8 +1109,38 @@ namespace Nostreets.Orm.EF
                 // so it must predate the change, not describe it.
                 var analyzedAtUtc = DateTime.UtcNow.ToString("O");
 
-                var drifts = SchemaDriftAnalyzer.Analyze(modelColumns, liveColumns);
-                drifts.AddRange(await SynthesizeDeclaredTransformsAsync(modelColumns));
+                List<ColumnDrift> drifts;
+
+                // BUG-150 follow-on / [D-323] — the whole table is absent.
+                //
+                // Reachable only under SuppressSchemaCreation, because otherwise CheckIfCreated has
+                // already created it by now. Report it as ONE TableMissing drift rather than as N
+                // column-adds: the columns are not independently addable (there is nothing to ALTER),
+                // and forward.sql must carry a CREATE TABLE, not a pile of ALTER ADDs against a table
+                // that does not exist.
+                if (options.SuppressSchemaCreation && !DoesTableExist())
+                {
+                    drifts = new List<ColumnDrift>
+                    {
+                        new ColumnDrift(
+                            ColumnName: TableName,
+                            Kind: ColumnDriftKind.TableMissing,
+                            Reason: $"The table [{TableName}] is declared by the model and does not exist in the database. " +
+                                    "It is normally created at host boot; the pipeline gate reports it instead, because a " +
+                                    "check that creates a table and then reports 'no drift' can never see a new table at all. " +
+                                    "Run the CREATE in forward.sql (or let the deploy's boot create it) and re-check.",
+                            ModelShape: null,
+                            LiveShape: null)
+                        {
+                            ScriptOverride = BuildCreateTableScript()
+                        }
+                    };
+                }
+                else
+                {
+                    drifts = SchemaDriftAnalyzer.Analyze(modelColumns, liveColumns);
+                    drifts.AddRange(await SynthesizeDeclaredTransformsAsync(modelColumns));
+                }
                 SchemaDriftTally.RecordAnalysis(drifts);
                 var artifacts = MigrationArtifactWriter.Compose(
                     TableName, drifts, this.GetService<IMigrationsSqlGenerator>(), analyzedAtUtc, analyzedAtUtc);
@@ -1199,6 +1249,37 @@ namespace Nostreets.Orm.EF
             }
         }
 
+        /// <summary>
+        /// The CREATE TABLE for this context's entity, for a <see cref="ColumnDriftKind.TableMissing"/>
+        /// drift's forward.sql.
+        /// </summary>
+        /// <remarks>
+        /// Uses EF's OWN creation script rather than a hand-composed CREATE, so the emitted table is
+        /// byte-for-byte what host boot would have produced — the operator running forward.sql and the
+        /// deploy creating it must not be able to disagree. This context is built per entity type, so
+        /// the script is scoped to that entity.
+        ///
+        /// The generator emits its own IF-NOT-EXISTS-shaped guards in some providers; the caller wraps
+        /// it in an OBJECT_ID check regardless, so it is re-runnable either way.
+        /// </remarks>
+        private string BuildCreateTableScript()
+        {
+            try
+            {
+                return Database.GenerateCreateScript();
+            }
+            catch (Exception ex)
+            {
+                // Never let artifact composition take down the check: the VALUE here is the report
+                // naming the table, and the script is the convenience. Losing the script must not turn
+                // "needs a human" (exit 3) into "the check broke" (exit 1) — two very different verdicts.
+                Console.WriteLine($"[SchemaDrift] [{TableName}]: could not compose the CREATE script ({ex.GetType().Name}: {ex.Message}). " +
+                                  "The table is still reported as missing; create it via a normal host boot.");
+                return $"-- Could not compose a CREATE for [{TableName}] ({ex.GetType().Name}). " +
+                       "Deploy the host normally (boot creates it) or script it by hand, then re-run the check.";
+            }
+        }
+
         private async Task<List<LiveColumn>> ReadLiveColumnsAsync()
         {
             var live = new List<LiveColumn>();
@@ -1269,7 +1350,12 @@ COMMIT;";
             await Database.ExecuteSqlRawAsync(sql);
         }
 
-        private async Task GenerateEnumTables()
+        /// <param name="options">
+        /// Read for <see cref="EFDBContextOptions.SuppressSchemaCreation"/> only. When it is on, the
+        /// existing-table ROW SYNC below still runs (DML, and the [D-233] taxonomy-#13 fix), while the
+        /// CREATE-a-missing-lookup-table half is skipped — the check pass may not do DDL.
+        /// </param>
+        private async Task GenerateEnumTables(EFDBContextOptions options)
         {
             var enumTypes = typeof(TContext).GetProperties()
                                             .Where(a => a.PropertyType.IsNullable(out Type underlyingType) ? underlyingType.IsEnum : a.PropertyType.IsEnum)
@@ -1296,6 +1382,16 @@ COMMIT;";
                         Console.WriteLine($"[SchemaDrift] [{enumType.Name}]: inserted {missing.Count} missing enum member(s): {string.Join(", ", missing)}.");
                     }
 
+                    continue;
+                }
+
+                // The lookup table itself is missing, so creating it is DDL — refused under suppression.
+                // Reported rather than silently skipped: an absent lookup table breaks every insert on
+                // its FK, so it is exactly the kind of thing the gate exists to make visible.
+                if (options.SuppressSchemaCreation)
+                {
+                    Console.WriteLine($"[SchemaDrift] [{enumType.Name}]: enum lookup table is MISSING and was NOT created " +
+                                      "(check mode does no DDL). It is created at host boot, or by the CREATE in forward.sql.");
                     continue;
                 }
 
@@ -1460,6 +1556,25 @@ COMMIT;";
 
         [Obsolete("Superseded by MigrationMode. The destructive drop-and-recreate this flag gated is disarmed: setting it now behaves as MigrationMode = Report.")]
         public bool MigrateIfNotCurrent { get; set; } = false;
+        /// <summary>
+        /// When true, this context performs NO DDL: a missing table is REPORTED as
+        /// <see cref="ColumnDriftKind.TableMissing"/> drift instead of being created, and enum-table
+        /// and foreign-key creation are skipped. Enum ROW sync still runs — that is DML, and it is the
+        /// [D-233] taxonomy-#13 fix that keeps a new enum member from breaking every later insert.
+        ///
+        /// 🔑 Exists for exactly one caller: the pipeline gate's <c>--schema-drift-check</c>, which
+        /// <see cref="ColumnDriftKind.TableMissing"/> explains. Defaults FALSE, so host boot and local
+        /// dev keep creating tables exactly as before — a new DTO plus a new EFDB service still gets
+        /// its table with no ceremony. Only the check pass is made incapable of DDL, which is what
+        /// [D-323] asked for.
+        ///
+        /// ⚠️ Set it from <see cref="ProgramBase"/>'s check-mode intercept, not from appsettings. It is
+        /// bound from config as a deliberate escape hatch, but a host that turned this on in normal
+        /// operation would fail to build its own schema at boot.
+        /// </summary>
+        public bool SuppressSchemaCreation { get; set; } = false;
+
+        [Obsolete("Never read. Table creation is governed by SuppressSchemaCreation (and, before it, by DoesTableExist). Setting this has no effect.")]
         public bool CreateContextTable { get; set; } = true;
         public bool CreateEnumTables { get; set; } = true;
         public bool CreateFKs { get; set; } = true;

@@ -1261,12 +1261,17 @@ namespace Nostreets.Orm.EF
         ///
         /// The generator emits its own IF-NOT-EXISTS-shaped guards in some providers; the caller wraps
         /// it in an OBJECT_ID check regardless, so it is re-runnable either way.
+        ///
+        /// GO is stripped because it is a BATCH SEPARATOR, not a statement, and the composer nests this
+        /// script inside the OBJECT_ID guard's BEGIN...END. A GO there splits the batch mid-block, so the
+        /// operator's client sees an unterminated BEGIN and a stray END, and forward.sql fails to parse —
+        /// during the 120-minute pause, whose only remedy IS running forward.sql.
         /// </remarks>
         private string BuildCreateTableScript()
         {
             try
             {
-                return Database.GenerateCreateScript();
+                return StripBatchSeparators(Database.GenerateCreateScript());
             }
             catch (Exception ex)
             {
@@ -1278,6 +1283,24 @@ namespace Nostreets.Orm.EF
                 return $"-- Could not compose a CREATE for [{TableName}] ({ex.GetType().Name}). " +
                        "Deploy the host normally (boot creates it) or script it by hand, then re-run the check.";
             }
+        }
+
+        /// <summary>
+        /// Drops standalone GO lines and the trailing blank space they leave behind. Matches the T-SQL
+        /// client rule: GO is only a separator when it is alone on its line, so a column or table named
+        /// GO is untouched.
+        /// </summary>
+        internal static string StripBatchSeparators(string script)
+        {
+            if (string.IsNullOrEmpty(script))
+                return script;
+
+            var kept = script
+                .Replace("\r\n", "\n")
+                .Split('\n')
+                .Where(line => !string.Equals(line.Trim(), "GO", StringComparison.OrdinalIgnoreCase));
+
+            return string.Join(Environment.NewLine, kept).TrimEnd();
         }
 
         private async Task<List<LiveColumn>> ReadLiveColumnsAsync()
@@ -1388,10 +1411,17 @@ COMMIT;";
                 // The lookup table itself is missing, so creating it is DDL — refused under suppression.
                 // Reported rather than silently skipped: an absent lookup table breaks every insert on
                 // its FK, so it is exactly the kind of thing the gate exists to make visible.
+                //
+                // The message must NOT offer forward.sql as the remedy. forward.sql is composed from the
+                // ENTITY's drifts, and an enum lookup table is not an analyzed entity, so no artifact ever
+                // carries a CREATE for it. Naming it would send the operator to run a script during the
+                // pause that provably cannot fix what the line just told them about. The deploy's own boot
+                // is the remedy, and it needs no operator action at all.
                 if (options.SuppressSchemaCreation)
                 {
                     Console.WriteLine($"[SchemaDrift] [{enumType.Name}]: enum lookup table is MISSING and was NOT created " +
-                                      "(check mode does no DDL). It is created at host boot, or by the CREATE in forward.sql.");
+                                      "(check mode does no DDL). No action needed — the deploy's own host boot creates and " +
+                                      "seeds it. It is NOT in forward.sql; only analyzed entity tables are.");
                     continue;
                 }
 

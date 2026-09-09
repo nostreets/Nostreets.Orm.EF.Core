@@ -476,6 +476,19 @@ ALTER TABLE [dbo].[{table}] DROP COLUMN [{oldName}];";
         /// <summary>One folder per process boot, so all of a host's tables share a run folder.</summary>
         public static readonly string RunStampUtc = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss'Z'");
 
+        /// <summary>
+        /// One line per table checked, drifted or not: <c>tableName\tdriftCount</c>.
+        /// </summary>
+        /// <remarks>
+        /// This is what lets a reader tell "checked and found clean" from "never checked" now that a
+        /// clean table writes no files of its own. Losing that distinction would be a real regression:
+        /// "39 of 40 tables clean" is the line that makes the one drifted table findable, and a gate
+        /// that silently checked nothing would look identical to one that found nothing.
+        /// </remarks>
+        public const string IndexFileName = "_checked.tsv";
+
+        private static readonly object IndexGate = new object();
+
         public static string Write(string directory, string tableName,
                                    IReadOnlyList<ColumnDrift> drifts, MigrationArtifacts artifacts)
         {
@@ -499,6 +512,19 @@ ALTER TABLE [dbo].[{table}] DROP COLUMN [{oldName}];";
                     : directory;
                 var folder = Path.Combine(root, RunStampUtc);
                 Directory.CreateDirectory(folder);
+
+                // Recorded for EVERY table, so the run keeps proof of what was checked even though the
+                // clean ones write nothing else. Locked because the sink is static and a future caller
+                // may not build tables one at a time; the schema build is sequential today.
+                lock (IndexGate)
+                    File.AppendAllText(Path.Combine(folder, IndexFileName), $"{tableName}\t{drifts.Count}\n");
+
+                // A clean table used to emit three files that said, in three ways, that there was nothing
+                // to do -- roughly 120 files for 40 tables, of which one had actually drifted. That volume
+                // is what buried the real drift, so the files now exist only where there is something to
+                // run. The index line above is the evidence that this table was checked.
+                if (drifts.Count == 0)
+                    return folder;
 
                 File.WriteAllText(Path.Combine(folder, $"{tableName}.report.md"), artifacts.Report);
                 File.WriteAllText(Path.Combine(folder, $"{tableName}.forward.sql"), artifacts.ForwardSql);

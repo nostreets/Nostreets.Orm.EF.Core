@@ -781,7 +781,8 @@ namespace Nostreets.Orm.EF
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlServer(ConnectionString, options => options.CommandTimeout(TimeoutInSeconds));
+            // BUG-24 - shared with SqlServerRetryTests, so the retry policy is proven on the real configuration path.
+            SqlServerContextOptions.Apply(optionsBuilder, ConnectionString, TimeoutInSeconds);
             optionsBuilder
                 .EnableSensitiveDataLogging()
                 .EnableDetailedErrors()

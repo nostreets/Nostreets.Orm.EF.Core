@@ -1,6 +1,8 @@
 using System.Linq.Expressions;
 using System.Configuration;
+using System.ComponentModel;
 using System.Data;
+using System.Globalization;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
@@ -1532,10 +1534,21 @@ COMMIT;";
             // map unknown C# Types To SQL Types 
             foreach (var property in typeof(TContext).GetProperties())
             {
-                if (property.HasAttribute<ForeignKeyAttribute>()) 
+                if (property.HasAttribute<ForeignKeyAttribute>())
                 {
                     config.Property(property.Name).HasMaxLength(450);
                 }
+
+                // A [DefaultValue] becomes a SQL COLUMN default, not a CLR one, and the distinction is
+                // load-bearing for the schema-drift generator. SchemaMigration routes a new column on
+                // HasDefault = GetDefaultValue() != null || GetDefaultValueSql() != null, but GenerateAdd
+                // carries only DefaultValueSql - so a CLR default would promote the drift to AddSafe and
+                // then emit ADD [col] <type> NOT NULL with no default, an executable statement that FAILS
+                // on a populated table. That is strictly worse than the blocked form it replaced. A SQL
+                // default emits ADD [col] <type> NOT NULL DEFAULT (<literal>), which works.
+                var declaredDefault = property.GetCustomAttribute<DefaultValueAttribute>();
+                if (declaredDefault?.Value != null && TryToSqlLiteral(declaredDefault.Value, out var literal))
+                    config.Property(property.Name).HasDefaultValueSql(literal);
 
                 switch (property.PropertyType.Name)
                 {
@@ -1551,6 +1564,32 @@ COMMIT;";
                             .HasConversion<TimeOnlyConverter, TimeOnlyComparer>();
                         break;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Renders a <see cref="DefaultValueAttribute"/> value as a SQL literal for
+        /// <c>HasDefaultValueSql</c>. Deliberately narrow: only the types whose literal form is
+        /// unambiguous across cultures and providers. Anything else returns false and the property is
+        /// left without a default, so a new NOT NULL column stays BLOCKED at the drift gate rather than
+        /// emitting a statement that would fail on a populated table.
+        /// </summary>
+        private static bool TryToSqlLiteral(object value, out string literal)
+        {
+            switch (value)
+            {
+                case bool b:
+                    literal = b ? "1" : "0";
+                    return true;
+                case byte or sbyte or short or ushort or int or uint or long or ulong:
+                    literal = Convert.ToString(value, CultureInfo.InvariantCulture)!;
+                    return true;
+                case string s:
+                    literal = "'" + s.Replace("'", "''") + "'";
+                    return true;
+                default:
+                    literal = null!;
+                    return false;
             }
         }
         #endregion

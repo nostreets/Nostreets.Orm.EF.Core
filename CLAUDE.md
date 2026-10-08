@@ -6,6 +6,17 @@
 
 ---
 
+## 🔴 Scheduled jobs — register every one with the orchestrator
+
+**A scheduled job of any kind is registered with the scheduled-task orchestrator ([D-602] rulings 19, 23).** A
+`TimerTrigger`, a pipeline `schedules:` block, a periodic `BackgroundService`, a Hangfire `RecurringJob`, a
+Dependabot or GitHub Actions schedule, a Task Scheduler task: the moment you add or change one, run
+`python "C:\AI Agents\Claude Cowork\OS Platform Second Brain\brain\tools\python\scheduled-task-orchestrate.py" doctor`
+and then the `register job --from-sweep ...` command its UNDECLARED row prints. A job registered from a branch that
+is not merged yet takes `--state pending`.
+
+---
+
 ## Project Overview
 
 The **Entity Framework Core ORM wrapper** that implements `Nostreets.Extensions.Core`'s
